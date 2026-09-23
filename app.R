@@ -91,36 +91,95 @@ us_state_codes <- c(
 
 ui <- page_sidebar(
   title = tags$span(
-    tags$img(src = "logo.png", height = "32px", style = "margin-right:10px; vertical-align:middle;",
+    tags$img(src = "logo.png", height = "80px", style = "margin-right:10px; vertical-align:middle;",
               onerror = "this.style.display='none'")
   ),
+  
   theme = bs_theme(
     version = 5,
-    bootswatch = "flatly",
-    primary   = "#4285F4",  # ByteBridge blue, from the logo
-    secondary = "#34A853",  # ByteBridge green
-    success   = "#34A853",
-    warning   = "#FBBC05",  # ByteBridge gold
-    danger    = "#EA4335",  # ByteBridge red
+    bg = "#0B0F14",
+    fg = "#E2E8F0",
+    primary = "#3B82F6",
+    secondary = "#64748B",
+    success = "#22C55E",
+    warning = "#F59E0B",
+    danger = "#EF4444",
     base_font = font_google("Inter"),
     heading_font = font_google("Inter")
-  ),
+  ) %>%
+    bs_add_rules("
+      html, body,
+      .bslib-page-sidebar,
+      .bslib-sidebar-layout,
+      .bslib-sidebar-layout > .main,
+      .tab-content,
+      .container-fluid {
+        background-color: #0B0F14 !important;
+        color: #E2E8F0 !important;
+      }
+
+      .card, .card-header, .card-body {
+        background-color: #111827 !important;
+        color: #E2E8F0 !important;
+        border-color: #1F2937 !important;
+      }
+
+      .bslib-value-box,
+      .bslib-value-box .value-box-area,
+      .bslib-value-box .value-box-showcase {
+        background-color: #111827 !important;
+        border-color: #1F2937 !important;
+        color: #E2E8F0 !important;
+      }
+
+      .bslib-sidebar-layout > .sidebar {
+        background-color: #111827 !important;
+        color: #E2E8F0 !important;
+      }
+
+      .leaflet-container {
+        background-color: #0B0F14 !important;
+      }
+
+      .dataTables_wrapper {
+        background-color: #111827 !important;
+        color: #E2E8F0 !important;
+      }
+      table.dataTable, table.dataTable td, table.dataTable th {
+        background-color: #111827 !important;
+        color: #E2E8F0 !important;
+        border-color: #1F2937 !important;
+      }
+      table.dataTable tbody tr:hover {
+        background-color: #1F2937 !important;
+      }
+      .dataTables_wrapper .dataTables_length,
+      .dataTables_wrapper .dataTables_filter,
+      .dataTables_wrapper .dataTables_info,
+      .dataTables_wrapper .dataTables_paginate {
+        color: #E2E8F0 !important;
+      }
+      .dataTables_wrapper .form-control {
+        background-color: #0B0F14 !important;
+        color: #E2E8F0 !important;
+        border-color: #1F2937 !important;
+      }
+    "),
 
   sidebar = sidebar(
     width = 300,
-    bg = "darkgray",
     radioButtons("scope", "Scope", choices = c("US only" = "us", "Global" = "global"), selected = "us"),
     selectizeInput("state_filter", "State (US)", choices = NULL, multiple = TRUE,
-                    options = list(placeholder = "All states")),
+                   options = list(placeholder = "All states")),
     conditionalPanel(
       condition = "input.scope == 'global'",
       selectizeInput("country_filter", "Country (non-US)", choices = NULL, multiple = TRUE,
-                      options = list(placeholder = "All countries"))
+                     options = list(placeholder = "All countries"))
     ),
     selectizeInput("city_filter", "City", choices = NULL, multiple = TRUE,
-                    options = list(placeholder = "All cities")),
+                   options = list(placeholder = "All cities")),
     selectizeInput("operator_filter", "Operator", choices = NULL, multiple = TRUE,
-                    options = list(placeholder = "All operators")),
+                   options = list(placeholder = "All operators")),
     sliderInput("capacity_filter", "Capacity (MW est.)", min = 0, max = 100,
                 value = c(0, 100), step = 1),
     hr(),
@@ -238,7 +297,8 @@ server <- function(input, output, session) {
 
   output$map <- renderLeaflet({
     leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18)) %>%
-      addProviderTiles(providers$OpenStreetMap.Mapnik, options = providerTileOptions(noWrap = TRUE)) %>%
+      #addProviderTiles(providers$OpenStreetMap.Mapnik, options = providerTileOptions(noWrap = TRUE)) %>%
+      addProviderTiles(providers$Esri.WorldGrayCanvas, options = providerTileOptions(noWrap = TRUE)) %>%
       setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
       setView(lng = -98.5, lat = 39.5, zoom = 4)
   })
@@ -250,7 +310,11 @@ server <- function(input, output, session) {
       clearMarkerClusters() %>%
       addCircleMarkers(
         lng = ~Longitude, lat = ~Latitude,
-        radius = 6, stroke = FALSE, fillOpacity = 0.75, color = "#2c7fb8",
+        radius = 8,
+        fillOpacity = 0.8,
+        color = "#60A5FA",
+        fillColor = "#3B82F6",
+        weight = 2,
         popup = ~paste0(
           "<b>", Operator, "</b><br>",
           City_clean, ", ", State, "<br>",
