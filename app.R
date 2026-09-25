@@ -1,21 +1,41 @@
+
+
 # ============================================================
+
 # Data Center Capacity Dashboard
+
 #
+
 # MASTER DATA:
-#   DC.xlsx
+
+# DC.xlsx
+
 #
+
 # RUNTIME DATA:
-#   dc_data.sqlite
+
+# dc_data.sqlite
+
 #
+
 # Workflow:
-#   1. Edit & save DC.xlsx
-#   2. Launch the app — it imports DC.xlsx automatically at startup
-#   3. (Optional) Use "Refresh from DC.xlsx" in Version History if
-#      you edit DC.xlsx while the app is already running
+
+# 1. Edit & save DC.xlsx
+
+# 2. Launch the app — it imports DC.xlsx automatically at startup
+
+# 3. (Optional) Use "Refresh from DC.xlsx" in Version History if
+
+# you edit DC.xlsx while the app is already running
+
 #
+
 # SQLite remains the fast runtime database.
+
 # Geocoding happens during import (startup or manual refresh),
+
 # reusing cached coordinates for cities already geocoded.
+
 # ============================================================
 
 # ---------- Packages ----------
@@ -75,10 +95,12 @@ MASTER_OPTIONAL_COLS <- c(
   "Contacts"
 )
 
-
 # ---------- Country centroids ----------
+
 #
+
 # Used only when a row has no city.
+
 # These are approximate map locations, not exact site locations.
 
 country_centroids <- tribble(
@@ -86,17 +108,13 @@ country_centroids <- tribble(
   ~ Latitude,
   ~ Longitude,
   "United States",
-  39.5,
-  -98.5,
+  39.5,-98.5,
   "Canada",
-  56.1,
-  -106.3,
+  56.1,-106.3,
   "United Kingdom",
-  54.0,
-  -2.0,
+  54.0,-2.0,
   "Ireland",
-  53.4,
-  -8.2,
+  53.4,-8.2,
   "Germany",
   51.2,
   10.4,
@@ -107,8 +125,7 @@ country_centroids <- tribble(
   52.1,
   5.3,
   "Spain",
-  40.0,
-  -4.0,
+  40.0,-4.0,
   "Italy",
   42.8,
   12.6,
@@ -125,8 +142,7 @@ country_centroids <- tribble(
   46.8,
   8.2,
   "Portugal",
-  39.6,
-  -8.0,
+  39.6,-8.0,
   "Belgium",
   50.6,
   4.7,
@@ -145,15 +161,11 @@ country_centroids <- tribble(
   "India",
   22.0,
   79.0,
-  "Australia",
-  -25.3,
+  "Australia",-25.3,
   133.8,
-  "Brazil",
-  -14.2,
-  -51.9,
+  "Brazil",-14.2,-51.9,
   "Mexico",
-  23.6,
-  -102.5,
+  23.6,-102.5,
   "United Arab Emirates",
   24.0,
   54.0,
@@ -169,8 +181,7 @@ country_centroids <- tribble(
   "Vietnam",
   14.1,
   108.3,
-  "Indonesia",
-  -0.8,
+  "Indonesia",-0.8,
   113.9,
   "Thailand",
   15.9,
@@ -181,35 +192,41 @@ country_centroids <- tribble(
   "Saudi Arabia",
   24.0,
   45.0,
-  "South Africa",
-  -30.6,
+  "South Africa",-30.6,
   22.9,
-  "Uruguay",
-  -32.5,
-  -55.8,
+  "Uruguay",-32.5,-55.8,
   "Sweden/Norway",
   61.3,
   11.8
 )
 
-
 # ============================================================
+
 # PARSING HELPERS
+
 # ============================================================
 
 # Examples:
+
 #
-# "20-40 MW"       -> 30
-# "3 MW + 6 MW"    -> 9
-# "18 MW"          -> 18
-# "5-10 MW ramp"   -> 7.5
-# NA / blank       -> NA
+
+# "20-40 MW" -> 30
+
+# "3 MW + 6 MW" -> 9
+
+# "18 MW" -> 18
+
+# "5-10 MW ramp" -> 7.5
+
+# NA / blank -> NA
 
 parse_capacity_mw <- function(x) {
   x <- as.character(x)
   
   # Remove thousands-separator commas (e.g. "3,300" -> "3300")
+  
   # before any number extraction happens below.
+  
   x <- str_replace_all(x, ",", "")
   
   vapply(x, function(val) {
@@ -233,9 +250,10 @@ parse_capacity_mw <- function(x) {
     }
     
     sum(part_vals, na.rm = TRUE)
+    
+    
   }, numeric(1), USE.NAMES = FALSE)
 }
-
 
 # "Q2 2027" -> 2027-04-01
 
@@ -254,15 +272,15 @@ quarter_to_date <- function(q) {
   ))
 }
 
-
 # ============================================================
+
 # DATABASE HELPERS
+
 # ============================================================
 
 get_con <- function() {
   dbConnect(RSQLite::SQLite(), DB_PATH)
 }
-
 
 initialize_database <- function() {
   con <- get_con()
@@ -332,7 +350,9 @@ initialize_database <- function() {
         is_us = logical(),
         Quarter = character(),
         Quarter_Date = character(),
-        MW_available = double()
+        MW_available = double(),
+        Latitude = double(),
+        Longitude = double()
       ),
       overwrite = TRUE
     )
@@ -354,30 +374,44 @@ initialize_database <- function() {
   }
 }
 
-
 initialize_database()
 
-
 # ============================================================
+
 # STARTUP IMPORT FROM DC.XLSX
+
 #
+
 # Runs once when the app process starts (i.e. when you launch
+
 # the app), not only when the "Refresh from DC.xlsx" button is
+
 # clicked. This keeps dc_current / dc_pipeline_current in sync
+
 # with DC.xlsx automatically every time you run the app.
+
 #
+
 # Progress is printed to the R console so you can see exactly
+
 # what it's doing and confirm it isn't stuck.
+
 #
+
 # NOTE: import_master_excel() calls save_new_version(), which
+
 # snapshots the previous state before writing. So even a
+
 # startup-triggered import is fully reversible from the
+
 # Version History tab.
-# ============================================================
-
 
 # ============================================================
+
+# ============================================================
+
 # MASTER EXCEL CLEANING
+
 # ============================================================
 
 clean_master_df <- function(raw) {
@@ -394,7 +428,6 @@ clean_master_df <- function(raw) {
     ))
   }
   
-  
   # Add optional columns if missing.
   
   for (col in MASTER_OPTIONAL_COLS) {
@@ -403,14 +436,12 @@ clean_master_df <- function(raw) {
     }
   }
   
-  
   # Trim text and turn blank strings into NA.
   
   raw <- raw %>%
     mutate(across(everything(), ~ na_if(str_trim(as.character(
       .x
     )), "")))
-  
   
   # ---------- Current sites ----------
   
@@ -488,7 +519,6 @@ clean_master_df <- function(raw) {
     raw %>%
     select(all_of(QUARTER_COLS))
   
-  
   # ---------- Convert quarter columns into rows ----------
   
   pipeline <-
@@ -526,9 +556,10 @@ clean_master_df <- function(raw) {
   list(current = current, pipeline = pipeline)
 }
 
-
 # ============================================================
+
 # GEOCODING
+
 # ============================================================
 
 load_geocode_cache <- function() {
@@ -548,7 +579,6 @@ load_geocode_cache <- function() {
     as_tibble()
 }
 
-
 save_geocode_cache <- function(cache_df) {
   con <- get_con()
   
@@ -557,10 +587,12 @@ save_geocode_cache <- function(cache_df) {
   dbWriteTable(con, "geocode_cache", cache_df, overwrite = TRUE)
 }
 
-
 # Geocode during import (startup or manual refresh).
+
 #
+
 # Existing cached cities are instantaneous.
+
 # New cities use OSM if tidygeocoder is installed.
 
 geocode_current <- function(current_df,
@@ -568,9 +600,10 @@ geocode_current <- function(current_df,
                             progress_fn = NULL) {
   cache <- load_geocode_cache()
   
-  
   # ----------------------------------------------------------
+  
   # Preserve coordinates already stored in SQLite.
+  
   # ----------------------------------------------------------
   
   if (!is.null(existing_current) &&
@@ -600,11 +633,14 @@ geocode_current <- function(current_df,
       bind_rows(cache, existing_coords) %>%
       
       distinct(key, .keep_all = TRUE)
+    
+    
   }
   
-  
   # ----------------------------------------------------------
+  
   # Find cities not already cached.
+  
   # ----------------------------------------------------------
   
   to_geocode <-
@@ -622,9 +658,10 @@ geocode_current <- function(current_df,
   
   new_rows <- tibble()
   
-  
   # ----------------------------------------------------------
+  
   # Geocode new cities.
+  
   # ----------------------------------------------------------
   
   if (nrow(to_geocode) > 0 &&
@@ -676,8 +713,9 @@ geocode_current <- function(current_df,
       
       Sys.sleep(1)
     }
+    
+    
   }
-  
   
   # Save newly geocoded cities.
   
@@ -688,11 +726,14 @@ geocode_current <- function(current_df,
       distinct(key, .keep_all = TRUE)
     
     save_geocode_cache(cache)
+    
+    
   }
   
-  
   # ----------------------------------------------------------
+  
   # Apply coordinates.
+  
   # ----------------------------------------------------------
   
   current_df %>%
@@ -737,11 +778,72 @@ geocode_current <- function(current_df,
     ) %>%
     
     select(-key, -Country_Lat, -Country_Lon)
+  
+  
 }
 
+# ============================================================
+
+# PIPELINE COORDINATES
+# ============================================================
+
+attach_pipeline_coordinates <- function(pipeline_df, current_df) {
+  if (nrow(pipeline_df) == 0) {
+    pipeline_df$Latitude <- numeric(0)
+    pipeline_df$Longitude <- numeric(0)
+    return(pipeline_df)
+  }
+  
+  if (!"Latitude" %in% names(pipeline_df)) {
+    pipeline_df$Latitude <- NA_real_
+  }
+  
+  if (!"Longitude" %in% names(pipeline_df)) {
+    pipeline_df$Longitude <- NA_real_
+  }
+  
+  coords <- current_df %>%
+    select(City_clean, State, Country, Latitude, Longitude) %>%
+    filter(!is.na(Latitude), !is.na(Longitude)) %>%
+    distinct(City_clean, State, Country, .keep_all = TRUE) %>%
+    rename(Current_Latitude = Latitude, Current_Longitude = Longitude)
+  
+  pipeline_df %>%
+    left_join(coords, by = c("City_clean", "State", "Country")) %>%
+    left_join(
+      country_centroids %>%
+        rename(Country_Latitude = Latitude, Country_Longitude = Longitude),
+      by = "Country"
+    ) %>%
+    mutate(
+      Latitude = coalesce(
+        Latitude,
+        Current_Latitude,
+        if_else(
+          str_ends(City_clean, " (no city provided)"),
+          Country_Latitude,
+          NA_real_
+        )
+      ),
+      Longitude = coalesce(
+        Longitude,
+        Current_Longitude,
+        if_else(
+          str_ends(City_clean, " (no city provided)"),
+          Country_Longitude,
+          NA_real_
+        )
+      )
+    ) %>%
+    select(-Current_Latitude,
+           -Current_Longitude,-Country_Latitude,
+           -Country_Longitude)
+}
 
 # ============================================================
+
 # DATABASE READ FUNCTIONS
+
 # ============================================================
 
 load_current <- function() {
@@ -753,7 +855,6 @@ load_current <- function() {
     dbReadTable(con, "dc_current") %>%
     as_tibble()
   
-  
   if ("is_us" %in% names(df)) {
     df$is_us <-
       as.logical(df$is_us)
@@ -761,7 +862,6 @@ load_current <- function() {
   } else {
     df$is_us <- FALSE
   }
-  
   
   # Make sure expected columns exist.
   
@@ -786,7 +886,6 @@ load_current <- function() {
     Longitude = NA_real_
   )
   
-  
   for (col in names(defaults)) {
     if (!col %in% names(df)) {
       df[[col]] <-
@@ -794,16 +893,13 @@ load_current <- function() {
     }
   }
   
-  
   df
 }
-
 
 load_current_pipeline <- function() {
   con <- get_con()
   
   on.exit(dbDisconnect(con), add = TRUE)
-  
   
   if (!"dc_pipeline_current" %in%
       dbListTables(con)) {
@@ -826,60 +922,61 @@ load_current_pipeline <- function() {
         Quarter_Date =
           as.Date(character()),
         
-        MW_available = double()
+        MW_available = double(),
+        
+        Latitude = double(),
+        
+        Longitude = double()
       )
     )
+    
+    
   }
-  
   
   df <-
     dbReadTable(con, "dc_pipeline_current") %>%
     as_tibble()
-  
   
   if ("Quarter_Date" %in% names(df)) {
     df$Quarter_Date <-
       as.Date(df$Quarter_Date)
   }
   
-  
   df$is_us <-
     as.logical(df$is_us)
   
-  
   df
 }
-
 
 list_versions <- function() {
   con <- get_con()
   
   on.exit(dbDisconnect(con), add = TRUE)
   
-  
   if (!"dc_meta" %in%
       dbListTables(con)) {
     return(tibble())
   }
-  
   
   dbReadTable(con, "dc_meta") %>%
     
     arrange(desc(version)) %>%
     
     as_tibble()
+  
+  
 }
 
-
 # ============================================================
+
 # SAVE VERSION
+
 # ============================================================
 
 save_new_version <- function(new_current, new_pipeline, note = "Manual update") {
   con <- get_con()
   
   on.exit(dbDisconnect(con), add = TRUE)
-  
   
   # Current metadata.
   
@@ -910,7 +1007,6 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
       NA_integer_
   }
   
-  
   next_v <-
     if (nrow(meta) == 0) {
       1L
@@ -921,7 +1017,9 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
   
   
   # ----------------------------------------------------------
+  
   # Snapshot whatever is currently live.
+  
   # ----------------------------------------------------------
   
   if ("dc_current" %in%
@@ -981,25 +1079,27 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
     
     next_v <-
       next_v + 1L
+    
+    
   }
   
-  
   # ----------------------------------------------------------
+  
   # Write new live data.
+  
   # ----------------------------------------------------------
   
   dbWriteTable(con, "dc_current", new_current, overwrite = TRUE)
   
-  
   dbWriteTable(con, "dc_pipeline_current", new_pipeline, overwrite = TRUE)
   
-  
   # ----------------------------------------------------------
+  
   # Save the new version.
+  
   # ----------------------------------------------------------
   
   dbWriteTable(con, paste0("dc_history_v", next_v), new_current, overwrite = TRUE)
-  
   
   dbWriteTable(con,
                
@@ -1034,9 +1134,10 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
   dbWriteTable(con, "dc_meta", meta, overwrite = TRUE)
 }
 
-
 # ============================================================
+
 # RESTORE VERSION
+
 # ============================================================
 
 restore_version <- function(v) {
@@ -1045,22 +1146,20 @@ restore_version <- function(v) {
   tbl_name <-
     paste0("dc_history_v", v)
   
-  
   if (!tbl_name %in%
       dbListTables(con)) {
     dbDisconnect(con)
     
     return(FALSE)
+    
+    
   }
-  
   
   old_current <-
     dbReadTable(con, tbl_name)
   
-  
   pipe_tbl <-
     paste0("dc_pipeline_history_v", v)
-  
   
   old_pipeline <-
     if (pipe_tbl %in%
@@ -1074,17 +1173,16 @@ restore_version <- function(v) {
   
   dbDisconnect(con)
   
-  
   save_new_version(old_current, old_pipeline, note =
                      paste("Restored from version", v))
-  
   
   TRUE
 }
 
-
 # ============================================================
+
 # IMPORT DC.XLSX
+
 # ============================================================
 
 import_master_excel <- function(progress_fn = NULL) {
@@ -1096,22 +1194,18 @@ import_master_excel <- function(progress_fn = NULL) {
     ))
   }
   
-  
   # Read Excel.
   
   raw <-
     readxl::read_excel(MASTER_FILE, col_types = "text")
   
-  
   names(raw) <-
     str_trim(names(raw))
-  
   
   # Clean into current + pipeline.
   
   parsed <-
     clean_master_df(raw)
-  
   
   # Existing data.
   
@@ -1121,7 +1215,6 @@ import_master_excel <- function(progress_fn = NULL) {
       error = function(e)
         NULL
     )
-  
   
   # Geocode / preserve coordinates.
   
@@ -1134,12 +1227,46 @@ import_master_excel <- function(progress_fn = NULL) {
                     progress_fn =
                       progress_fn)
   
+  # Geocode the unique locations represented in the upcoming-capacity
+  # pipeline as well. This means a pipeline-only location can still
+  # appear on the map even if it is not yet a current site.
+  pipeline_locations <-
+    parsed$pipeline %>%
+    distinct(City_clean, State, Country) %>%
+    mutate(
+      City = if_else(
+        str_ends(City_clean, " (no city provided)"),
+        NA_character_,
+        City_clean
+      ),
+      Operator = NA_character_,
+      Region = NA_character_,
+      is_us = Country == "United States"
+    )
+  
+  if (nrow(pipeline_locations) > 0) {
+    pipeline_locations <-
+      geocode_current(
+        pipeline_locations,
+        existing_current = parsed$current,
+        progress_fn = progress_fn
+      )
+  }
+  
+  parsed$pipeline <-
+    parsed$pipeline %>%
+    left_join(
+      pipeline_locations %>%
+        select(City_clean, State, Country, Latitude, Longitude) %>%
+        distinct(City_clean, State, Country, .keep_all = TRUE),
+      by = c("City_clean", "State", "Country")
+    )
+  
   
   # Save to SQLite.
   
   save_new_version(parsed$current, parsed$pipeline, note =
                      "Refresh from DC.xlsx")
-  
   
   list(current =
          parsed$current, pipeline =
@@ -1153,7 +1280,7 @@ if (file.exists(MASTER_FILE)) {
   startup_import_result <- tryCatch({
     import_master_excel(
       progress_fn = function(i, n, addr) {
-        cat(sprintf("  Geocoding %d/%d: %s\n", i, n, addr))
+        cat(sprintf(" Geocoding %d/%d: %s\n", i, n, addr))
         flush.console()
       }
     )
@@ -1180,7 +1307,9 @@ if (file.exists(MASTER_FILE)) {
 }
 
 # ============================================================
+
 # UI
+
 # ============================================================
 
 ui <- page_sidebar(
@@ -1194,8 +1323,9 @@ ui <- page_sidebar(
       onerror =
         "this.style.display='none'"
     )
+    
+    
   ),
-  
   
   theme = bs_theme(
     version = 5,
@@ -1220,213 +1350,215 @@ ui <- page_sidebar(
     heading_font =
       font_google("Inter")
     
+    
   ) %>%
     
     bs_add_rules(
       "
 
-      html, body,
-      .bslib-page-sidebar,
-      .bslib-sidebar-layout,
-      .bslib-sidebar-layout > .main,
-      .tab-content,
-      .container-fluid {
+  html, body,
+  .bslib-page-sidebar,
+  .bslib-sidebar-layout,
+  .bslib-sidebar-layout > .main,
+  .tab-content,
+  .container-fluid {
 
-        background-color:
-          #0B0F14 !important;
+    background-color:
+      #0B0F14 !important;
 
-        color:
-          #E2E8F0 !important;
-      }
+    color:
+      #E2E8F0 !important;
+  }
 
 
-      .card,
-      .card-header,
-      .card-body {
+  .card,
+  .card-header,
+  .card-body {
 
-        background-color:
-          #111827 !important;
-        color:
-          #E2E8F0 !important;
-        border-color:
-          #1F2937 !important;
-      }
+    background-color:
+      #111827 !important;
+    color:
+      #E2E8F0 !important;
+    border-color:
+      #1F2937 !important;
+  }
 
 
-      .bslib-value-box,
-      .bslib-value-box .value-box-area,
-      .bslib-value-box .value-box-showcase {
+  .bslib-value-box,
+  .bslib-value-box .value-box-area,
+  .bslib-value-box .value-box-showcase {
 
-        background-color:
-          #111827 !important;
+    background-color:
+      #111827 !important;
 
-        border-color:
-          #1F2937 !important;
+    border-color:
+      #1F2937 !important;
 
-        color:
-          #E2E8F0 !important;
-      }
+    color:
+      #E2E8F0 !important;
+  }
 
 
-      .bslib-sidebar-layout > .sidebar {
-        background-color:
-          #111827 !important;
-        color:
-          #E2E8F0 !important;
-      }
+  .bslib-sidebar-layout > .sidebar {
+    background-color:
+      #111827 !important;
+    color:
+      #E2E8F0 !important;
+  }
 
 
-      .leaflet-container {
-        background-color:
-          #0B0F14 !important;
-      }
+  .leaflet-container {
+    background-color:
+      #0B0F14 !important;
+  }
 
 
-      .dataTables_wrapper {
+  .dataTables_wrapper {
 
-        background-color:
-          #111827 !important;
+    background-color:
+      #111827 !important;
 
-        color:
-          #E2E8F0 !important;
-      }
+    color:
+      #E2E8F0 !important;
+  }
 
 
-      table.dataTable,
-      table.dataTable td,
-      table.dataTable th {
+  table.dataTable,
+  table.dataTable td,
+  table.dataTable th {
 
-        background-color:
-          #111827 !important;
+    background-color:
+      #111827 !important;
 
-        color:
-          #E2E8F0 !important;
+    color:
+      #E2E8F0 !important;
 
-        border-color:
-          #1F2937 !important;
-      }
+    border-color:
+      #1F2937 !important;
+  }
 
 
-      table.dataTable tbody tr:hover {
+  table.dataTable tbody tr:hover {
 
-        background-color:
-          #1F2937 !important;
-      }
+    background-color:
+      #1F2937 !important;
+  }
 
 
-      .dataTables_wrapper .dataTables_length,
-      .dataTables_wrapper .dataTables_filter,
-      .dataTables_wrapper .dataTables_info,
-      .dataTables_wrapper .dataTables_paginate {
+  .dataTables_wrapper .dataTables_length,
+  .dataTables_wrapper .dataTables_filter,
+  .dataTables_wrapper .dataTables_info,
+  .dataTables_wrapper .dataTables_paginate {
 
-        color:
-          #E2E8F0 !important;
-      }
+    color:
+      #E2E8F0 !important;
+  }
 
 
-      .dataTables_wrapper .form-control {
+  .dataTables_wrapper .form-control {
 
-        background-color:
-          #0B0F14 !important;
+    background-color:
+      #0B0F14 !important;
 
-        color:
-          #E2E8F0 !important;
+    color:
+      #E2E8F0 !important;
 
-        border-color:
-          #1F2937 !important;
-      }
+    border-color:
+      #1F2937 !important;
+  }
 
 
-      #pipeline_mw_filter {
+  #pipeline_mw_filter {
 
-        background-color:
-          #0B0F14 !important;
+    background-color:
+      #0B0F14 !important;
 
-        color:
-          #E2E8F0 !important;
+    color:
+      #E2E8F0 !important;
 
-        border-color:
-          #1F2937 !important;
-      }
+    border-color:
+      #1F2937 !important;
+  }
 
 
-      .form-control,
-      .selectize-input {
+  .form-control,
+  .selectize-input {
 
-        background-color:
-          #0B0F14 !important;
+    background-color:
+      #0B0F14 !important;
 
-        color:
-          #E2E8F0 !important;
+    color:
+      #E2E8F0 !important;
 
-        border-color:
-          #1F2937 !important;
-      }
+    border-color:
+      #1F2937 !important;
+  }
 
 
-            .selectize-dropdown {
+        .selectize-dropdown {
 
-        background-color:
-          #111827 !important;
+    background-color:
+      #111827 !important;
 
-        color:
-          #E2E8F0 !important;
+    color:
+      #E2E8F0 !important;
 
-        border-color:
-          #1F2937 !important;
-      }
+    border-color:
+      #1F2937 !important;
+  }
 
 
-      /* Make the MW Available slider larger/easier to grab */
+  /* Make the MW Available slider larger/easier to grab */
 
-      #pipeline_mw_filter .irs {
+  #pipeline_mw_filter .irs {
 
-        height: 144px !important;
-      }
+    height: 144px !important;
+  }
 
-      #pipeline_mw_filter .irs-line {
+  #pipeline_mw_filter .irs-line {
 
-        height: 12px !important;
+    height: 12px !important;
 
-        top: 30px !important;
-      }
+    top: 30px !important;
+  }
 
-      #pipeline_mw_filter .irs-bar {
+  #pipeline_mw_filter .irs-bar {
 
-        height: 12px !important;
+    height: 12px !important;
 
-        top: 30px !important;
-      }
+    top: 30px !important;
+  }
 
-      #pipeline_mw_filter .irs-handle {
+  #pipeline_mw_filter .irs-handle {
 
-        width: 26px !important;
+    width: 26px !important;
 
-        height: 26px !important;
+    height: 26px !important;
 
-        top: 22px !important;
-      }
+    top: 22px !important;
+  }
 
-      #pipeline_mw_filter .irs-min,
-      #pipeline_mw_filter .irs-max,
-      #pipeline_mw_filter .irs-single,
-      #pipeline_mw_filter .irs-from,
-      #pipeline_mw_filter .irs-to {
+  #pipeline_mw_filter .irs-min,
+  #pipeline_mw_filter .irs-max,
+  #pipeline_mw_filter .irs-single,
+  #pipeline_mw_filter .irs-from,
+  #pipeline_mw_filter .irs-to {
 
-        font-size: 14px !important;
-      }
+    font-size: 14px !important;
+  }
 
-    "
+"
     ),
   
   
   # ==========================================================
+  
   # SIDEBAR
+  
   # ==========================================================
   
   sidebar = sidebar(
     width = 300,
-    
     
     radioButtons(
       "scope",
@@ -1532,11 +1664,14 @@ ui <- page_sidebar(
     
     actionButton("reset_filters", "Reset filters", icon =
                    icon("rotate-left"))
+    
+    
   ),
   
-  
   # ==========================================================
+  
   # TABS
+  
   # ==========================================================
   
   navset_tab(
@@ -1739,6 +1874,20 @@ ui <- page_sidebar(
       
       
       card(
+        full_screen = TRUE,
+        
+        card_header("Upcoming Capacity Map"),
+        
+        leafletOutput("pipeline_map", height = 560)
+      ),
+      
+      
+      card(
+        card_header("Upcoming capacity by quarter"),
+        plotOutput("pipeline_quarter_chart", height = "380px")
+      ),
+      
+      card(
         card_header("Capacity coming available — chronological order"),
         
         DTOutput("pipeline_table")
@@ -1789,33 +1938,42 @@ ui <- page_sidebar(
         DTOutput("version_table")
       )
     )
+    
+    
   )
 )
 
-
 # ============================================================
+
 # SERVER
+
 # ============================================================
 
 server <- function(input, output, session) {
   # ----------------------------------------------------------
+  
   # Load SQLite ONLY at session start.
+  
   #
+  
   # By this point, the startup import block above has already
+  
   # run once for the whole app process, so this is reading
+  
   # fresh data — not triggering another import per session.
+  
   # ----------------------------------------------------------
   
   raw_data <-
     reactiveVal(load_current())
   
-  
   raw_pipeline <-
-    reactiveVal(load_current_pipeline())
-  
+    reactiveVal(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
   
   # ----------------------------------------------------------
+  
   # Location filter
+  
   # ----------------------------------------------------------
   
   apply_location_filter <- function(df) {
@@ -1823,7 +1981,6 @@ server <- function(input, output, session) {
       df <-
         df %>%
         filter(is_us)
-      
       
       if (length(input$state_filter) > 0) {
         df <-
@@ -1860,17 +2017,19 @@ server <- function(input, output, session) {
     
     
     df
+    
+    
   }
   
-  
   # ----------------------------------------------------------
+  
   # Update state/country/capacity filters
+  
   # ----------------------------------------------------------
   
   observeEvent(list(raw_data(), input$scope), {
     df <-
       raw_data()
-    
     
     updateSelectizeInput(session,
                          
@@ -1924,21 +2083,27 @@ server <- function(input, output, session) {
       value =
         c(0, ceiling(max_cap))
     )
+    
+    
   }, ignoreNULL = FALSE)
   
-  
   # ----------------------------------------------------------
+  
   # Upcoming Capacity country choices
+  
   #
+  
   # IMPORTANT:
+  
   # This is intentionally based ONLY on raw_pipeline().
+  
   # It does NOT depend on the Map & Table US/Global scope.
+  
   # ----------------------------------------------------------
   
   observeEvent(raw_pipeline(), {
     df <-
       raw_pipeline()
-    
     
     countries <-
       df %>%
@@ -1960,11 +2125,14 @@ server <- function(input, output, session) {
                            countries,
                          
                          server = TRUE)
+    
+    
   }, ignoreNULL = FALSE)
   
-  
   # ----------------------------------------------------------
+  
   # City choices
+  
   # ----------------------------------------------------------
   
   observeEvent(
@@ -1994,11 +2162,14 @@ server <- function(input, output, session) {
     },
     
     ignoreNULL = FALSE
+    
+    
   )
   
-  
   # ----------------------------------------------------------
+  
   # Operator choices
+  
   # ----------------------------------------------------------
   
   observeEvent(
@@ -2037,11 +2208,14 @@ server <- function(input, output, session) {
     },
     
     ignoreNULL = FALSE
+    
+    
   )
   
-  
   # ----------------------------------------------------------
+  
   # Reset
+  
   # ----------------------------------------------------------
   
   observeEvent(input$reset_filters, {
@@ -2081,17 +2255,19 @@ server <- function(input, output, session) {
       value =
         c(0, ceiling(pipeline_max))
     )
+    
+    
   })
   
-  
   # ----------------------------------------------------------
+  
   # Current-site filtering
+  
   # ----------------------------------------------------------
   
   filtered <- reactive({
     df <-
       apply_location_filter(raw_data())
-    
     
     if (length(input$city_filter) > 0) {
       df <-
@@ -2124,32 +2300,49 @@ server <- function(input, output, session) {
               input$capacity_filter[2]
           )
       )
+    
+    
   })
   
-  
   # ----------------------------------------------------------
+  
   # Pipeline filtering
+  
   #
+  
   # IMPORTANT:
+  
   # This is intentionally independent of the Map & Table
+  
   # filters.
+  
   #
+  
   # Therefore:
-  #   - US-only map setting does NOT remove Indonesia
-  #   - Map state filter does NOT affect Upcoming Capacity
-  #   - Map country filter does NOT affect Upcoming Capacity
-  #   - Map city/operator filters do NOT affect Upcoming Capacity
+  
+  # - US-only map setting does NOT remove Indonesia
+  
+  # - Map state filter does NOT affect Upcoming Capacity
+  
+  # - Map country filter does NOT affect Upcoming Capacity
+  
+  # - Map city/operator filters do NOT affect Upcoming Capacity
+  
   #
+  
   # Upcoming Capacity has its own:
-  #   - Country filter
-  #   - Quarter filter
-  #   - MW filter
+  
+  # - Country filter
+  
+  # - Quarter filter
+  
+  # - MW filter
+  
   # ----------------------------------------------------------
   
   filtered_pipeline <- reactive({
     df <-
       raw_pipeline()
-    
     
     # Country filter for Upcoming Capacity only.
     
@@ -2194,17 +2387,19 @@ server <- function(input, output, session) {
     df %>%
       
       arrange(Quarter_Date, Operator, Country, State, City_clean)
+    
+    
   })
   
-  
   # ----------------------------------------------------------
+  
   # Set maximum for upcoming MW slider
+  
   # ----------------------------------------------------------
   
   observeEvent(raw_pipeline(), {
     max_mw <-
       suppressWarnings(max(raw_pipeline()$MW_available, na.rm = TRUE))
-    
     
     if (!is.finite(max_mw)) {
       max_mw <- 100
@@ -2245,10 +2440,14 @@ server <- function(input, output, session) {
       value =
         ceiling(max_mw)
     )
+    
+    
   }, ignoreNULL = FALSE)
   
   # ----------------------------------------------------------
+  
   # Keep typed MW inputs in sync with the slider (slider -> typed)
+  
   # ----------------------------------------------------------
   
   observeEvent(input$pipeline_mw_filter, {
@@ -2256,15 +2455,17 @@ server <- function(input, output, session) {
                        "pipeline_mw_min_typed",
                        value = input$pipeline_mw_filter[1])
     
-    
     updateNumericInput(session,
                        "pipeline_mw_max_typed",
                        value = input$pipeline_mw_filter[2])
+    
+    
   }, ignoreInit = TRUE)
   
-  
   # ----------------------------------------------------------
+  
   # Keep the slider in sync with typed MW inputs (typed -> slider)
+  
   # ----------------------------------------------------------
   
   observeEvent(list(input$pipeline_mw_min_typed, input$pipeline_mw_max_typed),
@@ -2292,14 +2493,16 @@ server <- function(input, output, session) {
                
                ignoreInit = TRUE)
   
+  
   # ==========================================================
+  
   # UPCOMING HIGHLIGHT LOGIC
+  
   # ==========================================================
   
   upcoming_soon_keys <- reactive({
     pl <-
       raw_pipeline()
-    
     
     if (nrow(pl) == 0) {
       return(character(0))
@@ -2336,11 +2539,14 @@ server <- function(input, output, session) {
       pull(key) %>%
       
       unique()
+    
+    
   })
   
-  
   # ==========================================================
+  
   # VALUE BOXES
+  
   # ==========================================================
   
   output$vb_operators <-
@@ -2348,18 +2554,15 @@ server <- function(input, output, session) {
       n_distinct(filtered()$Operator)
     })
   
-  
   output$vb_cities <-
     renderText({
       n_distinct(filtered()$City_clean)
     })
   
-  
   output$vb_capacity <-
     renderText({
       total <-
         sum(filtered()$Capacity_MW_est, na.rm = TRUE)
-      
       
       format(round(total), big.mark = ",")
     })
@@ -2369,7 +2572,6 @@ server <- function(input, output, session) {
     renderText({
       nrow(filtered_pipeline())
     })
-  
   
   output$vb_pipeline_sites <-
     renderText({
@@ -2388,9 +2590,10 @@ server <- function(input, output, session) {
       )), big.mark = ",")
     })
   
-  
   # ==========================================================
+  
   # MAP
+  
   # ==========================================================
   
   output$map <-
@@ -2511,11 +2714,165 @@ server <- function(input, output, session) {
         clusterOptions =
           markerClusterOptions()
       )
+    
+    
   })
   
+  # ==========================================================
+  
+  # UPCOMING CAPACITY MAP
+  # ==========================================================
+  
+  output$pipeline_map <-
+    renderLeaflet({
+      # IMPORTANT: this map is rendered directly from the SAME
+      # reactive dataset as the Upcoming Capacity table.
+      df <- filtered_pipeline()
+      
+      base_map <- leaflet(options = leafletOptions(
+        worldCopyJump = FALSE,
+        minZoom = 2,
+        maxZoom = 18
+      )) %>%
+        addProviderTiles(providers$Esri.WorldGrayCanvas, options = providerTileOptions(noWrap = TRUE)) %>%
+        setMaxBounds(
+          lng1 = -180,
+          lat1 = -85,
+          lng2 = 180,
+          lat2 = 85
+        ) %>%
+        setView(lng = -20,
+                lat = 25,
+                zoom = 2)
+      
+      if (nrow(df) == 0) {
+        return(base_map)
+      }
+      
+      # Give every upcoming row a location. Prefer exact geocoded
+      # coordinates; otherwise use the country centroid.
+      df <- df %>%
+        left_join(
+          country_centroids %>%
+            rename(
+              Country_Latitude = Latitude,
+              Country_Longitude = Longitude
+            ),
+          by = "Country"
+        ) %>%
+        mutate(
+          map_base_lat = coalesce(Latitude, Country_Latitude),
+          map_base_lng = coalesce(Longitude, Country_Longitude)
+        )
+      
+      # If several upcoming rows are at the same location, spread
+      # them slightly so each quarter/capacity row can be clicked.
+      df <- df %>%
+        group_by(map_base_lat, map_base_lng) %>%
+        mutate(
+          point_n = n(),
+          point_i = row_number(),
+          angle = if_else(point_n > 1, 2 * pi * (point_i - 1) / point_n, 0),
+          offset_km = if_else(point_n > 1, 8, 0),
+          map_lat = map_base_lat +
+            (offset_km / 111.32) * sin(angle),
+          map_lng = map_base_lng +
+            (offset_km /
+               (111.32 * pmax(
+                 cos(map_base_lat * pi / 180), 0.2
+               ))) *
+            cos(angle)
+        ) %>%
+        ungroup()
+      
+      map_df <- df %>%
+        filter(!is.na(map_lat),!is.na(map_lng),!is.na(MW_available),
+               MW_available >= 0)
+      
+      if (nrow(map_df) == 0) {
+        return(base_map)
+      }
+      
+      min_mw <- min(map_df$MW_available, na.rm = TRUE)
+      max_mw <- max(map_df$MW_available, na.rm = TRUE)
+      
+      if (!is.finite(min_mw))
+        min_mw <- 0
+      if (!is.finite(max_mw))
+        max_mw <- 1
+      
+      pal <- colorNumeric(
+        palette = c("#93C5FD", "#1D4ED8"),
+        domain = if (min_mw == max_mw) {
+          c(min_mw, min_mw + 1)
+        } else {
+          c(min_mw, max_mw)
+        },
+        na.color = "#64748B"
+      )
+      
+      radius <- if (max_mw == min_mw) {
+        rep(9, nrow(map_df))
+      } else {
+        6 + 12 * sqrt((map_df$MW_available - min_mw) /
+                        (max_mw - min_mw))
+      }
+      
+      popup_text <- paste0(
+        "<div style='min-width:210px'>",
+        "<b style='font-size:15px'>",
+        ifelse(
+          is.na(map_df$Operator),
+          "Unknown operator",
+          map_df$Operator
+        ),
+        "</b><br>",
+        ifelse(
+          is.na(map_df$City_clean) | map_df$City_clean == "",
+          map_df$Country,
+          map_df$City_clean
+        ),
+        ifelse(
+          !is.na(map_df$State) & map_df$State != "",
+          paste0(", ", map_df$State),
+          ""
+        ),
+        "<br><br>",
+        "<b>Coming online:</b> ",
+        map_df$Quarter,
+        "<br>",
+        "<b>MW available:</b> ",
+        format(round(map_df$MW_available, 1), big.mark = ","),
+        " MW",
+        "</div>"
+      )
+      
+      base_map %>%
+        addCircleMarkers(
+          lng = map_df$map_lng,
+          lat = map_df$map_lat,
+          radius = radius,
+          stroke = TRUE,
+          weight = 1.5,
+          color = "#BFDBFE",
+          fillColor = pal(map_df$MW_available),
+          fillOpacity = 0.85,
+          popup = popup_text
+        ) %>%
+        addLegend(
+          position = "bottomright",
+          pal = pal,
+          values = map_df$MW_available,
+          title = "Upcoming MW",
+          opacity = 0.9,
+          labFormat = labelFormat(suffix = " MW")
+        )
+    })
   
   # ==========================================================
+  
   # CURRENT TABLE
+  
   # ==========================================================
   
   output$table <-
@@ -2547,13 +2904,82 @@ server <- function(input, output, session) {
   
   
   # ==========================================================
+  
+  # ==========================================================
+  
+  # UPCOMING CAPACITY BY QUARTER
+  # ==========================================================
+  
+  output$pipeline_quarter_chart <- renderPlot({
+    df <- filtered_pipeline()
+    
+    quarter_totals <- tibble(Quarter = QUARTER_COLS) %>%
+      left_join(df %>%
+                  group_by(Quarter) %>%
+                  summarise(
+                    MW = sum(MW_available, na.rm = TRUE),
+                    .groups = "drop"
+                  ),
+                by = "Quarter") %>%
+      mutate(MW = if_else(is.na(MW), 0, MW))
+    
+    if (length(input$quarter_filter) > 0) {
+      quarter_totals <- quarter_totals %>%
+        filter(Quarter %in% input$quarter_filter)
+    }
+    
+    if (nrow(quarter_totals) == 0) {
+      plot.new()
+      text(0.5,
+           0.5,
+           "No upcoming capacity matches the current filters.",
+           cex = 1.1)
+      return()
+    }
+    
+    par(
+      bg = "#111827",
+      fg = "#E5E7EB",
+      col.axis = "#D1D5DB",
+      col.lab = "#E5E7EB",
+      col.main = "#F9FAFB",
+      mar = c(5.5, 5.5, 2.5, 1.5)
+    )
+    
+    bp <- barplot(
+      height = quarter_totals$MW,
+      names.arg = quarter_totals$Quarter,
+      col = "#3B82F6",
+      border = NA,
+      las = 2,
+      ylab = "Upcoming capacity (MW)",
+      main = "Total capacity coming online by quarter",
+      cex.axis = 0.85,
+      cex.names = 0.85,
+      cex.lab = 0.95,
+      cex.main = 1.05
+    )
+    
+    text(
+      x = bp,
+      y = quarter_totals$MW,
+      labels = format(round(quarter_totals$MW, 1), big.mark = ","),
+      pos = 3,
+      offset = 0.35,
+      col = "#E5E7EB",
+      cex = 0.8
+    )
+  }, res = 96)
+  
+  # ==========================================================
+  
   # UPCOMING CAPACITY TABLE
+  
   # ==========================================================
   
   output$pipeline_table <- renderDT({
     df <-
       filtered_pipeline()
-    
     
     if (nrow(df) == 0) {
       return(datatable(
@@ -2591,16 +3017,12 @@ server <- function(input, output, session) {
       
       transmute(
         Operator,
-        
         City =
           City_clean,
         
         State,
-        
         Country,
-        
         Region,
-        
         Quarter,
         
         `MW Available` =
@@ -2612,28 +3034,22 @@ server <- function(input, output, session) {
     
     datatable(
       df,
-      
       rownames = FALSE,
-      
       options =
         list(
           pageLength = 25,
-          
           scrollX = TRUE,
-          
           autoWidth = TRUE,
-          
-          order =
-            list(list(7, "asc")),
-          
+          order = list(list(7, "asc")),
           columnDefs =
             list(list(
               visible = FALSE, targets = 7
             ))
         )
     )
+    
+    
   })
-  
   
   # ==========================================================
   # REFRESH FROM DC.XLSX
@@ -2642,11 +3058,9 @@ server <- function(input, output, session) {
   refresh_trigger <-
     reactiveVal(0)
   
-  
   output$refresh_status <-
     renderUI({
       refresh_trigger()
-      
       
       versions <-
         list_versions()
@@ -2725,7 +3139,7 @@ server <- function(input, output, session) {
       raw_data(load_current())
       
       
-      raw_pipeline(load_current_pipeline())
+      raw_pipeline(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
       
       
       refresh_trigger(refresh_trigger() + 1)
@@ -2743,23 +3157,20 @@ server <- function(input, output, session) {
           
           " upcoming-capacity entries."
         ),
-        
         type = "message",
-        
         duration = 8
       )
-      
     }, error = function(e) {
       showNotification(
         paste("Excel refresh failed:", conditionMessage(e)),
         
         type = "error",
-        
         duration = 12
       )
     })
+    
+    
   })
-  
   
   # ==========================================================
   # VERSION HISTORY TABLE
@@ -2768,7 +3179,6 @@ server <- function(input, output, session) {
   output$version_table <-
     renderDT({
       refresh_trigger()
-      
       
       versions <-
         list_versions()
@@ -2812,7 +3222,6 @@ server <- function(input, output, session) {
         )
     })
   
-  
   # ==========================================================
   # RESTORE VERSION
   # ==========================================================
@@ -2820,7 +3229,6 @@ server <- function(input, output, session) {
   observeEvent(input$version_table_rows_selected, {
     sel <-
       input$version_table_rows_selected
-    
     
     req(sel)
     
@@ -2860,16 +3268,14 @@ server <- function(input, output, session) {
       easyClose = TRUE
     ))
     
-    
     session$userData$pending_restore <-
       v
+    
   })
-  
   
   observeEvent(input$confirm_restore, {
     v <-
       session$userData$pending_restore
-    
     
     req(v)
     
@@ -2879,20 +3285,17 @@ server <- function(input, output, session) {
     
     raw_data(load_current())
     
-    
-    raw_pipeline(load_current_pipeline())
-    
+    raw_pipeline(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
     
     refresh_trigger(refresh_trigger() + 1)
     
     
     removeModal()
     
-    
     showNotification(paste("Restored version", v, "and set it live."), type = "message")
+    
   })
 }
-
 
 # ============================================================
 # RUN APP
