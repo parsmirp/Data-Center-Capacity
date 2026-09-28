@@ -2782,7 +2782,7 @@ server <- function(input, output, session) {
         max_mw <- 1
       
       pal <- colorNumeric(
-        palette = c("#93C5FD", "#1D4ED8"),
+        palette = c("#DBEAFE", "#60A5FA", "#1D4ED8", "#0A1A4A"),
         domain = if (min_mw == max_mw) {
           c(min_mw, min_mw + 1)
         } else {
