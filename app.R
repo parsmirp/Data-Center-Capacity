@@ -1,43 +1,24 @@
-
-
 # ============================================================
-
 # Data Center Capacity Dashboard
 
-#
-
 # MASTER DATA:
-
 # DC.xlsx
 
-#
-
 # RUNTIME DATA:
-
 # dc_data.sqlite
 
-#
-
 # Workflow:
-
 # 1. Edit & save DC.xlsx
-
 # 2. Launch the app — it imports DC.xlsx automatically at startup
-
 # 3. (Optional) Use "Refresh from DC.xlsx" in Version History if
 
 # you edit DC.xlsx while the app is already running
 
 #
-
 # SQLite remains the fast runtime database.
-
 # Geocoding happens during import (startup or manual refresh),
-
 # reusing cached coordinates for cities already geocoded.
-
 # ============================================================
-
 # ---------- Packages ----------
 
 library(shiny)
@@ -57,7 +38,6 @@ library(tidyr)
 
 DB_PATH <- "dc_data.sqlite"
 MASTER_FILE <- "DC.xlsx"
-
 # ---------- Quarter columns ----------
 
 QUARTER_COLS <- c(
@@ -2953,7 +2933,7 @@ server <- function(input, output, session) {
       border = NA,
       las = 2,
       ylab = "Upcoming capacity (MW)",
-      main = "Total capacity coming online by quarter",
+      main = "Capacity coming online by quarter",
       cex.axis = 0.85,
       cex.names = 0.85,
       cex.lab = 0.95,
@@ -2972,9 +2952,7 @@ server <- function(input, output, session) {
   }, res = 96)
   
   # ==========================================================
-  
   # UPCOMING CAPACITY TABLE
-  
   # ==========================================================
   
   output$pipeline_table <- renderDT({
@@ -2985,9 +2963,7 @@ server <- function(input, output, session) {
       return(datatable(
         tibble(Message =
                  "No upcoming capacity matches the current filters."),
-        
         rownames = FALSE,
-        
         options =
           list(dom = "t")
       ))
@@ -3083,19 +3059,13 @@ server <- function(input, output, session) {
         strong("Latest database update: "),
         
         latest$timestamp,
-        
         tags$br(),
-        
         "Version: ",
         latest$version,
-        
         tags$br(),
-        
         "Sites: ",
         latest$n_rows,
-        
         tags$br(),
-        
         "Upcoming entries: ",
         latest$n_pipeline_rows
       )
@@ -3110,12 +3080,9 @@ server <- function(input, output, session) {
           MASTER_FILE,
           ". Make sure it is in the same folder as app.R."
         ),
-        
         type = "error",
-        
         duration = 10
       )
-      
       return()
     }
     
@@ -3137,20 +3104,14 @@ server <- function(input, output, session) {
       # Update reactive data immediately.
       
       raw_data(load_current())
-      
-      
       raw_pipeline(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
-      
-      
       refresh_trigger(refresh_trigger() + 1)
       
       
       showNotification(
         paste0(
           "DC.xlsx imported successfully: ",
-          
           nrow(result$current),
-          
           " sites and ",
           
           nrow(result$pipeline),
