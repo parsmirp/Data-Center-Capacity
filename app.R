@@ -1,8 +1,7 @@
 # ============================================================
 # Data Center Capacity Dashboard
-
 # MASTER DATA:
-# DC.xlsx
+# DC.xlsx 
 
 # RUNTIME DATA:
 # dc_data.sqlite
@@ -2586,94 +2585,72 @@ server <- function(input, output, session) {
   
   
   observe({
-    df <-
-      filtered() %>%
-      
+    df <- filtered() %>%
       filter(!is.na(Latitude), !is.na(Longitude))
     
+    keys <- upcoming_soon_keys()
     
-    if (isTRUE(input$highlight_upcoming) &&
-        nrow(df) > 0) {
-      keys <-
-        upcoming_soon_keys()
-      
-      
-      df <-
-        df %>%
+    # Spread rows that share identical coordinates into a small ring (~250 m)
+    df <- df %>%
+      arrange(Operator, City_clean) %>%
+      group_by(Latitude, Longitude) %>%
+      mutate(
+        point_n = n(),
+        point_i = row_number(),
+        angle   = if_else(point_n > 1, 2 * pi * (point_i - 1) / point_n, 0),
+        off_km  = if_else(point_n > 1, 0.25, 0),
+        map_lat = Latitude + (off_km / 111.32) * sin(angle),
+        map_lng = Longitude + (off_km / (111.32 * pmax(cos(Latitude * pi / 180), 0.2))) * cos(angle)
+      ) %>%
+      ungroup() %>%
+      mutate(
+        key = paste(Operator, City_clean, State, Country, sep = "|"),
+        is_upcoming_soon = if (isTRUE(input$highlight_upcoming)) key %in% keys else FALSE,
         
-        mutate(
-          key =
-            paste(Operator, City_clean, State, Country, sep = "|"),
-          
-          is_upcoming_soon =
-            key %in%
-            keys
-        )
-      
-    } else {
-      df$is_upcoming_soon <-
-        FALSE
-    }
-    
-    
-    leafletProxy("map", data = df) %>%
-      
-      clearMarkers() %>%
-      
-      clearMarkerClusters() %>%
-      
-      addCircleMarkers(
-        lng = ~ Longitude,
+        op_txt    = htmltools::htmlEscape(enc2utf8(coalesce(Operator, "Unknown operator"))),
+        city_txt  = htmltools::htmlEscape(enc2utf8(coalesce(City_clean, ""))),
+        place_txt = htmltools::htmlEscape(enc2utf8(
+          if_else(is.na(State) | State == "", coalesce(Country, ""), State)
+        )),
+        cap_txt   = htmltools::htmlEscape(enc2utf8(coalesce(Capacity, "n/a"))),
+        cool_txt  = htmltools::htmlEscape(enc2utf8(coalesce(Cooling, "Unknown"))),
         
-        lat = ~ Latitude,
-        
-        radius = 8,
-        
-        fillOpacity = 0.85,
-        
-        color =
-          ~ ifelse(is_upcoming_soon, "#F59E0B", "#60A5FA"),
-        
-        fillColor =
-          ~ ifelse(is_upcoming_soon, "#F59E0B", "#3B82F6"),
-        
-        weight = 2,
-        
-        popup =
-          ~ paste0(
-            "<b>",
-            Operator,
-            "</b><br>",
-            
-            City_clean,
-            
-            ", ",
-            
-            ifelse(is.na(State) |
-                     State == "", Country, State),
-            
-            "<br>",
-            
-            "Capacity: ",
-            
-            ifelse(is.na(Capacity), "n/a", Capacity),
-            
-            ifelse(
-              is_upcoming_soon,
-              
-              "<br><b style='color:#F59E0B'>Capacity coming available soon — see Upcoming Capacity tab</b>",
-              
-              ""
-            )
+        popup_html = paste0(
+          "<div style='min-width:200px'>",
+          "<b>", op_txt, "</b><br>",
+          city_txt, ", ", place_txt, "<br>",
+          "Capacity: ", cap_txt,
+          if_else(is.na(Cooling), "", paste0("<br>Cooling: ", cool_txt)),
+          if_else(
+            is_upcoming_soon,
+            "<br><b style='color:#F59E0B'>Capacity coming available soon — see Upcoming Capacity tab</b>",
+            ""
           ),
-        
-        clusterOptions =
-          markerClusterOptions()
+          "</div>"
+        ),
+        label_txt = paste0(op_txt, " — ", city_txt)
       )
     
-    
+    leafletProxy("map", data = df) %>%
+      clearMarkers() %>%
+      clearMarkerClusters() %>%
+      addCircleMarkers(
+        lng = ~map_lng,
+        lat = ~map_lat,
+        radius = 8,
+        fillOpacity = 0.85,
+        color = ~ifelse(is_upcoming_soon, "#F59E0B", "#60A5FA"),
+        fillColor = ~ifelse(is_upcoming_soon, "#F59E0B", "#3B82F6"),
+        weight = 2,
+        popup = ~popup_html,
+        label = ~lapply(label_txt, htmltools::HTML),
+        clusterOptions = markerClusterOptions(
+          disableClusteringAtZoom = 14,
+          spiderfyOnMaxZoom = FALSE,
+          maxClusterRadius = 40
+        )
+      )
   })
-  
   # ==========================================================
   
   # UPCOMING CAPACITY MAP
