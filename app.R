@@ -851,6 +851,51 @@ if (file.exists(MASTER_FILE)) {
 }
 
 # ============================================================
+# JS + small UI helpers
+# ============================================================
+
+APP_JS <- r"---(
+$(function() {
+  // Sliders created inside hidden panels can render with zero width;
+  // refresh them whenever the tab changes.
+  $(document).on('shown.bs.tab', function() {
+    setTimeout(function() {
+      $('input.js-range-slider').each(function() {
+        var inst = $(this).data('ionRangeSlider');
+        if (inst) inst.update();
+      });
+      window.dispatchEvent(new Event('resize'));
+    }, 200);
+  });
+
+  // Highlight button: switch between outline and filled style
+  Shiny.addCustomMessageHandler('hl_state', function(on) {
+    $('#highlight_toggle')
+      .toggleClass('btn-warning', on)
+      .toggleClass('btn-outline-warning', !on)
+      .find('.hl-label')
+      .text(on ? 'Highlighting coming soon' : 'Highlight coming soon');
+  });
+});
+)---"
+
+# A range slider with two editable number boxes on top.
+# Drag the slider OR type exact values in the boxes; they stay in sync
+# (see sync_range() in the server).
+range_slider <- function(id, min = 0, max = 100, value = c(0, 100), step = 1) {
+  div(
+    class = "range-wrap",
+    div(
+      class = "range-inputs",
+      numericInput(paste0(id, "_lo"), NULL, value = value[1], min = min, step = step),
+      span(class = "range-dash", "\u2013"),
+      numericInput(paste0(id, "_hi"), NULL, value = value[2], min = min, step = step)
+    ),
+    sliderInput(id, NULL, min = min, max = max, value = value, step = step)
+  )
+}
+
+# ============================================================
 # UI
 # ============================================================
 
@@ -988,7 +1033,6 @@ ui <- page_sidebar(
   }
   .sb-summary-main { font-size: 13px; color: #CBD5E1; }
   .sb-summary-main b { font-size: 22px; color: #60A5FA; }
-  .sb-summary-sub { font-size: 12px; color: #94A3B8; }
 
   .sb-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 
@@ -1026,17 +1070,39 @@ ui <- page_sidebar(
   }
 
   /* Scope radio -> segmented toggle */
-  #scope .shiny-options-group {
+  .seg-toggle .shiny-options-group {
     display: flex; background: #0B0F14; border: 1px solid #1F2937;
     border-radius: 8px; padding: 3px;
   }
-  #scope .form-check { flex: 1; margin: 0; padding: 0; }
-  #scope .form-check-input { position: absolute; opacity: 0; }
-  #scope .form-check-label {
+  .seg-toggle .form-check { flex: 1; margin: 0; padding: 0; }
+  .seg-toggle .form-check-input { position: absolute; opacity: 0; }
+  .seg-toggle .form-check-label {
     display: block; text-align: center; padding: 6px 0; border-radius: 6px;
     cursor: pointer; color: #94A3B8; font-size: 13px; transition: all .15s;
   }
-  #scope .form-check-input:checked + .form-check-label { background: #3B82F6; color: #fff; }
+  .seg-toggle .form-check-input:checked + .form-check-label { background: #3B82F6; color: #fff; }
+
+  .sb-section-label {
+    font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: #94A3B8; margin: 14px 0 6px;
+  }
+  .sb-section-label:first-child { margin-top: 2px; }
+  .sb-hint { font-size: 11px; color: #64748B; margin-top: -4px; }
+  .sb-presets .btn { flex: 1; }
+
+  /* Range slider with typed number boxes */
+  .range-wrap .irs-from, .range-wrap .irs-to, .range-wrap .irs-single {
+    display: none !important;
+  }
+  .range-inputs { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  .range-inputs .form-group,
+  .range-inputs .shiny-input-container {
+    margin: 0 !important; flex: 1; width: auto !important;
+  }
+  .range-inputs input {
+    text-align: center; font-weight: 600; color: #60A5FA !important;
+  }
+  .range-dash { color: #64748B; }
 "
     ),
   
@@ -1054,12 +1120,6 @@ ui <- page_sidebar(
     conditionalPanel(
       condition = "input.main_tabs == 'Data Centers'",
       
-      div(
-        class = "sb-presets",
-        actionButton("preset_soon", "Highlight coming soon",
-                     class = "btn-sm btn-outline-warning")
-      ),
-      
       uiOutput("filter_chips"),
       
       accordion(
@@ -1069,9 +1129,10 @@ ui <- page_sidebar(
         
         accordion_panel(
           "Location", value = "loc", icon = icon("location-dot"),
-          radioButtons("scope", NULL,
-                       choices = c("US only" = "us", "Global" = "global"),
-                       selected = "global", inline = TRUE),
+          div(class = "seg-toggle",
+              radioButtons("scope", NULL,
+                           choices = c("US only" = "us", "Global" = "global"),
+                           selected = "global", inline = TRUE)),
           selectizeInput("state_filter", "State (US)", choices = NULL, multiple = TRUE,
                          options = list(placeholder = "All states",
                                         plugins = list("remove_button"))),
@@ -1095,16 +1156,15 @@ ui <- page_sidebar(
         
         accordion_panel(
           "Capacity", value = "cap", icon = icon("bolt"),
-          sliderInput("capacity_filter", NULL, min = 0, max = 100,
-                      value = c(0, 100), step = 0.1)
-        ),
-        
-        accordion_panel(
-          "Map options", value = "map", icon = icon("layer-group"),
-          input_switch("highlight_upcoming",
-                       "Highlight sites with capacity in next 4 quarters",
-                       value = FALSE)
+          range_slider("capacity_filter", 0, 100, c(0, 100), step = 1)
         )
+      ),
+      
+      actionButton(
+        "highlight_toggle",
+        span(class = "hl-label", "Highlight coming soon"),
+        class = "btn-outline-warning w-100 mt-3",
+        title = "Highlight sites with capacity arriving in the next 4 quarters"
       )
     ),
     
@@ -1112,32 +1172,42 @@ ui <- page_sidebar(
     conditionalPanel(
       condition = "input.main_tabs == 'Upcoming Capacity'",
       
-      accordion(
-        id = "sb_acc_pipe",
-        open = c("pl", "pm"),
-        multiple = TRUE,
-        
-        accordion_panel(
-          "Location & timing", value = "pl", icon = icon("calendar"),
-          selectizeInput("pipeline_country_filter", "Country", choices = NULL, multiple = TRUE,
-                         options = list(placeholder = "All countries",
-                                        plugins = list("remove_button"))),
-          selectizeInput("quarter_filter", "Quarter", choices = QUARTER_COLS, multiple = TRUE,
-                         options = list(placeholder = "All quarters",
-                                        plugins = list("remove_button")))
-        ),
-        
-        accordion_panel(
-          "MW available", value = "pm", icon = icon("bolt"),
-          sliderInput("pipeline_mw_filter", NULL, min = 0, max = 100,
-                      value = c(0, 100), step = 0.1),
-          layout_columns(
-            col_widths = c(6, 6),
-            numericInput("pipeline_mw_min_typed", "Min MW", value = 0, min = 0, step = 0.1),
-            numericInput("pipeline_mw_max_typed", "Max MW", value = 100, min = 0, step = 0.1)
-          )
-        )
-      )
+      div(class = "sb-section-label", "Scope"),
+      div(class = "seg-toggle",
+          radioButtons("pipeline_scope", NULL,
+                       choices = c("US only" = "us", "Global" = "global"),
+                       selected = "global", inline = TRUE)),
+      
+      conditionalPanel(
+        condition = "input.pipeline_scope == 'us'",
+        div(class = "sb-section-label", "State"),
+        selectizeInput("pipeline_state_filter", NULL, choices = NULL, multiple = TRUE,
+                       options = list(placeholder = "All states",
+                                      plugins = list("remove_button")))
+      ),
+      
+      conditionalPanel(
+        condition = "input.pipeline_scope == 'global'",
+        div(class = "sb-section-label", "Country"),
+        selectizeInput("pipeline_country_filter", NULL, choices = NULL, multiple = TRUE,
+                       options = list(placeholder = "All countries",
+                                      plugins = list("remove_button")))
+      ),
+      
+      div(class = "sb-section-label", "Timing"),
+      div(
+        class = "sb-presets",
+        actionButton("q_2026", "2026", class = "btn-sm btn-outline-primary"),
+        actionButton("q_2027", "2027", class = "btn-sm btn-outline-primary"),
+        actionButton("q_2028", "2028", class = "btn-sm btn-outline-primary"),
+        actionButton("q_2029", "2029", class = "btn-sm btn-outline-primary")
+      ),
+      selectizeInput("quarter_filter", NULL, choices = QUARTER_COLS, multiple = TRUE,
+                     options = list(placeholder = "All quarters",
+                                    plugins = list("remove_button"))),
+      
+      div(class = "sb-section-label", "MW available"),
+      range_slider("pipeline_mw_filter", 0, 100, c(0, 100), step = 0.1)
     ),
     
     hr(),
@@ -1149,6 +1219,8 @@ ui <- page_sidebar(
   # ==========================================================
   # TABS
   # ==========================================================
+  
+  tags$head(tags$script(HTML(APP_JS))),
   
   navset_tab(
     id = "main_tabs",
@@ -1301,6 +1373,10 @@ server <- function(input, output, session) {
     attach_pipeline_coordinates(load_current_pipeline(), load_current())
   )
   
+  # Current maximum of each range slider (used to clamp typed values)
+  cap_slider_max <- reactiveVal(100)
+  pipe_slider_max <- reactiveVal(100)
+  
   # ----------------------------------------------------------
   # Location filter
   # ----------------------------------------------------------
@@ -1362,6 +1438,8 @@ server <- function(input, output, session) {
       max_cap <- 100
     }
     
+    cap_slider_max(ceiling(max_cap))
+    
     updateSliderInput(
       session, "capacity_filter",
       max = ceiling(max_cap),
@@ -1384,6 +1462,18 @@ server <- function(input, output, session) {
     updateSelectizeInput(
       session, "pipeline_country_filter",
       choices = countries,
+      server = TRUE
+    )
+    
+    pl_states <- raw_pipeline() %>%
+      filter(is_us, !is.na(State), State != "") %>%
+      distinct(State) %>%
+      arrange(State) %>%
+      pull(State)
+    
+    updateSelectizeInput(
+      session, "pipeline_state_filter",
+      choices = pl_states,
       server = TRUE
     )
   }, ignoreNULL = FALSE)
@@ -1439,17 +1529,6 @@ server <- function(input, output, session) {
   
   fmt <- function(x) format(round(x), big.mark = ",")
   
-  scoped_df <- reactive({
-    df <- raw_data()
-    if (input$scope == "us") df <- filter(df, is_us)
-    df
-  })
-  
-  cap_max <- reactive({
-    m <- suppressWarnings(max(scoped_df()$Capacity_MW_est, na.rm = TRUE))
-    if (!is.finite(m)) 100 else ceiling(m)
-  })
-  
   # Live results summary (changes with the active tab)
   output$sb_summary <- renderUI({
     if (identical(input$main_tabs, "Upcoming Capacity")) {
@@ -1470,7 +1549,6 @@ server <- function(input, output, session) {
       class = "sb-summary",
       div(class = "sb-summary-main",
           tags$b(fmt(n)), paste0(" of ", fmt(total), " ", label)),
-      div(class = "sb-summary-sub", paste(fmt(mw), "MW in view"))
     )
   })
   
@@ -1519,36 +1597,53 @@ server <- function(input, output, session) {
   })
   
   # Presets
-  observeEvent(input$preset_hyper, {
-    updateSliderInput(
-      session, "capacity_filter",
-      value = c(min(50, cap_max()), cap_max())
-    )
+  # Highlight toggle (button at the bottom of the sidebar)
+  highlight_on <- reactiveVal(FALSE)
+  
+  observeEvent(input$highlight_toggle, {
+    highlight_on(!highlight_on())
   })
   
-  observeEvent(input$preset_soon, {
-    update_switch("highlight_upcoming", value = TRUE, session = session)
-  })
+  observeEvent(highlight_on(), {
+    session$sendCustomMessage("hl_state", highlight_on())
+  }, ignoreInit = TRUE)
   
-  # Capacity distribution sparkline (bars inside the slider range are bright)
-  output$cap_sparkline <- renderPlot({
-    x <- scoped_df()$Capacity_MW_est
-    x <- x[is.finite(x)]
+  # Slider <-> typed-number boxes (drag OR type)
+  sync_range <- function(id, max_fn) {
+    lo_id <- paste0(id, "_lo")
+    hi_id <- paste0(id, "_hi")
     
-    par(mar = c(0, 0, 0, 0), bg = NA)
+    # slider -> boxes
+    observeEvent(input[[id]], {
+      updateNumericInput(session, lo_id, value = input[[id]][1])
+      updateNumericInput(session, hi_id, value = input[[id]][2])
+    })
     
-    if (length(x) < 2) {
-      plot.new()
-      return()
-    }
-    
-    h <- hist(x, breaks = 20, plot = FALSE)
-    rng <- input$capacity_filter
-    cols <- ifelse(h$mids >= rng[1] & h$mids <= rng[2], "#3B82F6", "#1E293B")
-    
-    plot(h, col = cols, border = NA, axes = FALSE,
-         main = "", xlab = "", ylab = "")
-  }, bg = "transparent", res = 96)
+    # boxes -> slider
+    observeEvent(list(input[[lo_id]], input[[hi_id]]), {
+      lo <- input[[lo_id]]
+      hi <- input[[hi_id]]
+      req(is.numeric(lo), is.numeric(hi), is.finite(lo), is.finite(hi))
+      
+      mx <- max_fn()
+      a <- min(max(min(lo, hi), 0), mx)
+      b <- min(max(max(lo, hi), 0), mx)
+      
+      # Show the clamped / re-ordered values back in the boxes
+      if (a != lo || b != hi) {
+        updateNumericInput(session, lo_id, value = a)
+        updateNumericInput(session, hi_id, value = b)
+      }
+      
+      cur <- input[[id]]
+      if (is.null(cur) || abs(cur[1] - a) > 1e-9 || abs(cur[2] - b) > 1e-9) {
+        updateSliderInput(session, id, value = c(a, b))
+      }
+    }, ignoreInit = TRUE)
+  }
+  
+  sync_range("capacity_filter", cap_slider_max)
+  sync_range("pipeline_mw_filter", pipe_slider_max)
   
   # Data freshness footer
   output$data_freshness <- renderText({
@@ -1568,13 +1663,15 @@ server <- function(input, output, session) {
   
   observeEvent(input$reset_filters, {
     updateRadioButtons(session, "scope", selected = "global")
+    updateRadioButtons(session, "pipeline_scope", selected = "global")
     
     for (id in c("state_filter", "country_filter", "city_filter",
-                 "operator_filter", "pipeline_country_filter", "quarter_filter")) {
+                 "operator_filter", "pipeline_country_filter",
+                 "pipeline_state_filter", "quarter_filter")) {
       updateSelectizeInput(session, id, selected = character(0))
     }
     
-    update_switch("highlight_upcoming", value = FALSE, session = session)
+    highlight_on(FALSE)
     
     gmax <- suppressWarnings(max(raw_data()$Capacity_MW_est, na.rm = TRUE))
     if (!is.finite(gmax)) gmax <- 100
@@ -1630,7 +1727,14 @@ server <- function(input, output, session) {
   filtered_pipeline <- reactive({
     df <- raw_pipeline()
     
-    if (length(input$pipeline_country_filter) > 0) {
+    # Upcoming Capacity has its own US / Global scope.
+    if (identical(input$pipeline_scope, "us")) {
+      df <- df %>% filter(is_us)
+      
+      if (length(input$pipeline_state_filter) > 0) {
+        df <- df %>% filter(State %in% input$pipeline_state_filter)
+      }
+    } else if (length(input$pipeline_country_filter) > 0) {
       df <- df %>% filter(Country %in% input$pipeline_country_filter)
     }
     
@@ -1661,55 +1765,31 @@ server <- function(input, output, session) {
       max_mw <- 100
     }
     
+    pipe_slider_max(ceiling(max_mw))
+    
     updateSliderInput(
       session, "pipeline_mw_filter",
       max = ceiling(max_mw),
       value = c(0, ceiling(max_mw))
     )
     
-    updateNumericInput(
-      session, "pipeline_mw_min_typed",
-      max = ceiling(max_mw),
-      value = 0
-    )
-    
-    updateNumericInput(
-      session, "pipeline_mw_max_typed",
-      max = ceiling(max_mw),
-      value = ceiling(max_mw)
-    )
   }, ignoreNULL = FALSE)
   
   # ----------------------------------------------------------
-  # Keep typed MW inputs in sync with the slider (slider -> typed)
+  # Year shortcut buttons for the Quarter filter
   # ----------------------------------------------------------
   
-  observeEvent(input$pipeline_mw_filter, {
-    updateNumericInput(session, "pipeline_mw_min_typed",
-                       value = input$pipeline_mw_filter[1])
-    
-    updateNumericInput(session, "pipeline_mw_max_typed",
-                       value = input$pipeline_mw_filter[2])
-  }, ignoreInit = TRUE)
-  
-  # ----------------------------------------------------------
-  # Keep the slider in sync with typed MW inputs (typed -> slider)
-  # ----------------------------------------------------------
-  
-  observeEvent(
-    list(input$pipeline_mw_min_typed, input$pipeline_mw_max_typed),
-    {
-      req(input$pipeline_mw_min_typed, input$pipeline_mw_max_typed)
-      
-      new_min <- min(input$pipeline_mw_min_typed, input$pipeline_mw_max_typed)
-      new_max <- max(input$pipeline_mw_min_typed, input$pipeline_mw_max_typed)
-      
-      if (!identical(input$pipeline_mw_filter, c(new_min, new_max))) {
-        updateSliderInput(session, "pipeline_mw_filter", value = c(new_min, new_max))
-      }
-    },
-    ignoreInit = TRUE
-  )
+  for (yr in 2026:2029) {
+    local({
+      y <- yr
+      observeEvent(input[[paste0("q_", y)]], {
+        updateSelectizeInput(
+          session, "quarter_filter",
+          selected = QUARTER_COLS[grepl(as.character(y), QUARTER_COLS, fixed = TRUE)]
+        )
+      })
+    })
+  }
   
   # ==========================================================
   # UPCOMING HIGHLIGHT LOGIC
@@ -1785,6 +1865,31 @@ server <- function(input, output, session) {
       setView(lng = -98.5, lat = 39.5, zoom = 4)
   })
   
+  output$map <- renderLeaflet({
+    leaflet(options = leafletOptions(
+      worldCopyJump = FALSE,
+      minZoom = 2,
+      maxZoom = 18
+    )) %>%
+      addProviderTiles(providers$Esri.WorldGrayCanvas,
+                       options = providerTileOptions(noWrap = TRUE)) %>%
+      setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
+      setView(lng = -98.5, lat = 39.5, zoom = 4)
+  })
+  
+  # Recenters the map when scope changes (US or global)
+  observeEvent(input$scope, {
+    proxy <- leafletProxy("map")
+    
+    if (identical(input$scope, "us")) {
+      proxy %>%
+        setView(lng = -98.5, lat = 39.5, zoom = 4)
+    } else {
+      proxy %>%
+        setView(lng = -20, lat = 25, zoom = 2)
+    }
+  }, ignoreInit = TRUE)
+  ##############################
   observe({
     df <- filtered() %>%
       filter(!is.na(Latitude), !is.na(Longitude))
@@ -1806,7 +1911,7 @@ server <- function(input, output, session) {
       ungroup() %>%
       mutate(
         key = paste(Operator, City_clean, State, Country, sep = "|"),
-        is_upcoming_soon = if (isTRUE(input$highlight_upcoming)) key %in% keys else FALSE,
+        is_upcoming_soon = if (isTRUE(highlight_on())) key %in% keys else FALSE,
         
         op_txt = htmltools::htmlEscape(enc2utf8(coalesce(Operator, "Unknown operator"))),
         city_txt = htmltools::htmlEscape(enc2utf8(coalesce(City_clean, ""))),
@@ -1869,7 +1974,11 @@ server <- function(input, output, session) {
       addProviderTiles(providers$Esri.WorldGrayCanvas,
                        options = providerTileOptions(noWrap = TRUE)) %>%
       setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
-      setView(lng = -20, lat = 25, zoom = 2)
+      setView(
+        lng = if (identical(input$pipeline_scope, "us")) -98.5 else -20,
+        lat = if (identical(input$pipeline_scope, "us")) 39.5 else 25,
+        zoom = if (identical(input$pipeline_scope, "us")) 4 else 2
+      )
     
     if (nrow(df) == 0) {
       return(base_map)
