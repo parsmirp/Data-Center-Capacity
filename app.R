@@ -1724,7 +1724,7 @@ ui <- page_sidebar(
         col_widths = c(4, 4, 4),
         
         value_box(
-          title = "Total upcoming capacity (MW)",
+          title = "Total upcoming capacity (MW est.)",
           value = textOutput("vb_pipeline_mw"),
           showcase = icon("bolt"),
           theme = "success"
@@ -1733,14 +1733,14 @@ ui <- page_sidebar(
         value_box(
           title = "Upcoming entries in view",
           value = textOutput("vb_pipeline_entries"),
-          showcase = icon("clock"),
+          showcase = tags$span(icon("clock"), class = "glow-blue"),
           theme = "warning"
         ),
         
         value_box(
           title = "Sites in view",
           value = textOutput("vb_pipeline_sites"),
-          showcase = icon("building"),
+          showcase = tags$span(icon("building"), class = "glow-blue"),
           theme = "primary"
         )
         
