@@ -9,6 +9,7 @@
 # Workflow:
 # 1. Edit & save DC.xlsx
 # 2. Launch the app - it imports DC.xlsx automatically at startup
+#    (only if the file changed since the last import)
 # 3. (Optional) Use "Refresh from DC.xlsx" in Version History if
 #    you edit DC.xlsx while the app is already running
 
@@ -634,6 +635,7 @@ list_versions <- function() {
 # ============================================================
 # SAVE VERSION
 # ============================================================
+
 MAX_VERSIONS <- 15L
 
 prune_history <- function(con, meta, keep = MAX_VERSIONS) {
@@ -759,6 +761,40 @@ restore_version <- function(v) {
 }
 
 # ============================================================
+# IMPORT CHANGE DETECTION
+# Skips the startup import when DC.xlsx hasn't changed
+# ============================================================
+
+file_signature <- function() {
+  unname(tools::md5sum(MASTER_FILE))
+}
+
+get_stored_signature <- function() {
+  con <- get_con()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  if (!"import_state" %in% dbListTables(con)) {
+    return(NA_character_)
+  }
+  
+  df <- dbReadTable(con, "import_state")
+  
+  if (nrow(df) == 0) NA_character_ else df$signature[1]
+}
+
+set_stored_signature <- function(sig) {
+  con <- get_con()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  dbWriteTable(
+    con,
+    "import_state",
+    tibble(signature = sig, imported_at = as.character(Sys.time())),
+    overwrite = TRUE
+  )
+}
+
+# ============================================================
 # IMPORT DC.XLSX
 # ============================================================
 
@@ -769,6 +805,10 @@ import_master_excel <- function(progress_fn = NULL) {
       ". Make sure it is in the same folder as app.R."
     ))
   }
+  
+  # Hash the file before reading it, so an edit made mid-import
+  # isn't mistaken for "already imported".
+  import_sig <- file_signature()
   
   # Read Excel.
   raw <- readxl::read_excel(MASTER_FILE, col_types = "text")
@@ -820,8 +860,8 @@ import_master_excel <- function(progress_fn = NULL) {
     )
   
   # Save to SQLite.
-  
   save_new_version(parsed$current, parsed$pipeline, note = "Refresh from DC.xlsx")
+  set_stored_signature(import_sig)
   
   list(current = parsed$current, pipeline = parsed$pipeline)
 }
@@ -829,13 +869,20 @@ import_master_excel <- function(progress_fn = NULL) {
 # ============================================================
 # STARTUP IMPORT FROM DC.XLSX
 #
-# Runs once when the app process starts. import_master_excel()
-# calls save_new_version(), which snapshots the previous state
-# first, so even a startup import is reversible from the
-# Version History tab.
+# Runs once when the app process starts, but only if DC.xlsx
+# changed since the last import. import_master_excel() calls
+# save_new_version(), which snapshots the previous state first,
+# so even a startup import is reversible from the Version
+# History tab.
 # ============================================================
 
-if (file.exists(MASTER_FILE)) {
+if (!file.exists(MASTER_FILE)) {
+  cat(MASTER_FILE, "not found at startup - using existing SQLite data only.\n")
+  
+} else if (identical(file_signature(), get_stored_signature())) {
+  cat(MASTER_FILE, "unchanged since last import - skipping startup import.\n")
+  
+} else {
   cat("Importing", MASTER_FILE, "at startup...\n")
   flush.console()
   
@@ -861,8 +908,6 @@ if (file.exists(MASTER_FILE)) {
       )
     )
   }
-} else {
-  cat(MASTER_FILE, "not found at startup - using existing SQLite data only.\n")
 }
 
 # ============================================================
@@ -1382,10 +1427,11 @@ server <- function(input, output, session) {
   # app process, so this reads fresh data.
   # ----------------------------------------------------------
   
-  raw_data <- reactiveVal(load_current())
+  cur <- load_current()
+  raw_data <- reactiveVal(cur)
   
   raw_pipeline <- reactiveVal(
-    attach_pipeline_coordinates(load_current_pipeline(), load_current())
+    attach_pipeline_coordinates(load_current_pipeline(), cur)
   )
   
   # Current maximum of each range slider (used to clamp typed values)
