@@ -22,14 +22,12 @@
 library(shiny)
 library(bslib)
 library(leaflet)
-library(leaflet.extras)
 library(DT)
 library(plotly)
 library(dplyr)
 library(stringr)
 library(DBI)
 library(RSQLite)
-library(readr)
 library(readxl)
 library(tidyr)
 library(jsonlite)
@@ -636,6 +634,19 @@ list_versions <- function() {
 # ============================================================
 # SAVE VERSION
 # ============================================================
+MAX_VERSIONS <- 15L
+
+prune_history <- function(con, meta, keep = MAX_VERSIONS) {
+  meta <- meta %>% arrange(desc(version))
+  if (nrow(meta) <= keep) return(meta)
+  
+  drop_v <- as.integer(meta$version[(keep + 1):nrow(meta)])
+  for (v in drop_v) {
+    dbExecute(con, sprintf('DROP TABLE IF EXISTS "dc_history_v%d"', v))
+    dbExecute(con, sprintf('DROP TABLE IF EXISTS "dc_pipeline_history_v%d"', v))
+  }
+  meta[seq_len(keep), ]
+}
 
 save_new_version <- function(new_current, new_pipeline, note = "Manual update") {
   con <- get_con()
@@ -711,7 +722,9 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
     )
   )
   
+  meta <- prune_history(con, meta)
   dbWriteTable(con, "dc_meta", meta, overwrite = TRUE)
+  dbExecute(con, "VACUUM")
 }
 
 # ============================================================
@@ -807,6 +820,7 @@ import_master_excel <- function(progress_fn = NULL) {
     )
   
   # Save to SQLite.
+  
   save_new_version(parsed$current, parsed$pipeline, note = "Refresh from DC.xlsx")
   
   list(current = parsed$current, pipeline = parsed$pipeline)
@@ -919,8 +933,8 @@ ui <- page_sidebar(
     success = "#22C55E",
     warning = "#F59E0B",
     danger = "#EF4444",
-    base_font = font_google("Inter"),
-    heading_font = font_google("Inter")
+    base_font = font_google("Inter", local = TRUE),
+    heading_font = font_google("Inter", local = TRUE)
   ) %>%
     bs_add_rules(
       "
@@ -1853,18 +1867,6 @@ server <- function(input, output, session) {
   # ==========================================================
   # MAP
   # ==========================================================
-  
-  output$map <- renderLeaflet({
-    leaflet(options = leafletOptions(
-      worldCopyJump = FALSE,
-      minZoom = 2,
-      maxZoom = 18
-    )) %>%
-      addProviderTiles(providers$Esri.WorldGrayCanvas,
-                       options = providerTileOptions(noWrap = TRUE)) %>%
-      setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
-      setView(lng = -98.5, lat = 39.5, zoom = 4)
-  })
   
   output$map <- renderLeaflet({
     leaflet(options = leafletOptions(
