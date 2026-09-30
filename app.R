@@ -24,6 +24,7 @@ library(bslib)
 library(leaflet)
 library(leaflet.extras)
 library(DT)
+library(plotly)
 library(dplyr)
 library(stringr)
 library(DBI)
@@ -1307,7 +1308,7 @@ ui <- page_sidebar(
       
       card(
         card_header("Upcoming capacity by quarter"),
-        plotOutput("pipeline_quarter_chart", height = "380px")
+        plotlyOutput("pipeline_quarter_chart", height = "380px")
       ),
       
       card(
@@ -2099,66 +2100,157 @@ server <- function(input, output, session) {
       arrange(Operator, Country, State, City)
   }, options = list(pageLength = 15), rownames = FALSE)
   
-  # ==========================================================
+  ##
   # UPCOMING CAPACITY BY QUARTER
   # ==========================================================
   
-  output$pipeline_quarter_chart <- renderPlot({
+  output$pipeline_quarter_chart <- renderPlotly({
+    
     df <- filtered_pipeline()
     
-    quarter_totals <- tibble(Quarter = QUARTER_COLS) %>%
-      left_join(
-        df %>%
-          group_by(Quarter) %>%
-          summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop"),
-        by = "Quarter"
+    if (nrow(df) == 0) {
+      return(
+        plot_ly() %>%
+          layout(
+            paper_bgcolor = "#111827",
+            plot_bgcolor = "#111827",
+            font = list(color = "#E2E8F0", family = "Inter"),
+            xaxis = list(visible = FALSE),
+            yaxis = list(visible = FALSE),
+            annotations = list(
+              list(
+                text = "No upcoming capacity matches the current filters.",
+                x = 0.5,
+                y = 0.5,
+                xref = "paper",
+                yref = "paper",
+                showarrow = FALSE,
+                font = list(size = 14, color = "#94A3B8")
+              )
+            )
+          )
+      )
+    }
+    
+    # Total MW by quarter
+    quarter_totals <- df %>%
+      mutate(
+        Quarter = factor(Quarter, levels = QUARTER_COLS),
+        Operator = if_else(
+          is.na(Operator) | Operator == "",
+          "Unknown operator",
+          Operator
+        )
       ) %>%
-      mutate(MW = if_else(is.na(MW), 0, MW))
+      group_by(Quarter) %>%
+      summarise(
+        MW = sum(MW_available, na.rm = TRUE),
+        .groups = "drop"
+      )
     
-    if (length(input$quarter_filter) > 0) {
-      quarter_totals <- quarter_totals %>%
-        filter(Quarter %in% input$quarter_filter)
-    }
+    # Operator breakdown for hover
+    operator_breakdown <- df %>%
+      mutate(
+        Quarter = factor(Quarter, levels = QUARTER_COLS),
+        Operator = if_else(
+          is.na(Operator) | Operator == "",
+          "Unknown operator",
+          Operator
+        )
+      ) %>%
+      group_by(Quarter, Operator) %>%
+      summarise(
+        MW = sum(MW_available, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      group_by(Quarter) %>%
+      summarise(
+        Breakdown = paste0(
+          "<b>", Operator, "</b>: ",
+          format(round(MW, 1), big.mark = ","),
+          " MW",
+          collapse = "<br>"
+        ),
+        .groups = "drop"
+      )
     
-    if (nrow(quarter_totals) == 0) {
-      plot.new()
-      text(0.5, 0.5, "No upcoming capacity matches the current filters.", cex = 1.1)
-      return()
-    }
+    chart_data <- quarter_totals %>%
+      left_join(operator_breakdown, by = "Quarter")
     
-    par(
-      bg = "#111827",
-      fg = "#E5E7EB",
-      col.axis = "#D1D5DB",
-      col.lab = "#E5E7EB",
-      col.main = "#F9FAFB",
-      mar = c(5.5, 5.5, 2.5, 1.5)
-    )
-    
-    bp <- barplot(
-      height = quarter_totals$MW,
-      names.arg = quarter_totals$Quarter,
-      col = "#3B82F6",
-      border = NA,
-      las = 2,
-      ylab = "Upcoming capacity (MW)",
-      main = "Capacity coming online by quarter",
-      cex.axis = 0.85,
-      cex.names = 0.85,
-      cex.lab = 0.95,
-      cex.main = 1.05
-    )
-    
-    text(
-      x = bp,
-      y = quarter_totals$MW,
-      labels = format(round(quarter_totals$MW, 1), big.mark = ","),
-      pos = 3,
-      offset = 0.35,
-      col = "#E5E7EB",
-      cex = 0.8
-    )
-  }, res = 96)
+    plot_ly(
+      data = chart_data,
+      x = ~Quarter,
+      y = ~MW,
+      type = "bar",
+      
+      text = ~format(round(MW, 1), big.mark = ","),
+      textposition = "outside",
+      
+      hovertext = ~paste0(
+        "<b>", Quarter, "</b>",
+        "<br><b>Total: ", format(round(MW, 1), big.mark = ","), " MW</b>",
+        "<br><br>",
+        Breakdown
+      ),
+      
+      hoverinfo = "text",
+      
+      marker = list(
+        color = "#3B82F6"
+      )
+    ) %>%
+      
+      layout(
+        paper_bgcolor = "#111827",
+        plot_bgcolor = "#111827",
+        
+        font = list(
+          color = "#E2E8F0",
+          family = "Inter"
+        ),
+        
+        title = list(
+          text = "Capacity coming online by quarter",
+          font = list(
+            size = 16,
+            color = "#F9FAFB"
+          )
+        ),
+        
+        xaxis = list(
+          title = NULL,
+          categoryorder = "array",
+          categoryarray = QUARTER_COLS,
+          tickfont = list(color = "#CBD5E1"),
+          gridcolor = "#1F2937",
+          linecolor = "#374151"
+        ),
+        
+        yaxis = list(
+          title = "Upcoming capacity (MW)",
+          titlefont = list(color = "#CBD5E1"),
+          tickfont = list(color = "#CBD5E1"),
+          gridcolor = "#1F2937",
+          zerolinecolor = "#374151"
+        ),
+        
+        hovermode = "closest",
+        
+        margin = list(
+          l = 65,
+          r = 30,
+          t = 65,
+          b = 60
+        ),
+        
+        showlegend = FALSE
+      ) %>%
+      
+      config(
+        displayModeBar = FALSE,
+        responsive = TRUE
+      )
+  })
   
   # ==========================================================
   # UPCOMING CAPACITY TABLE
