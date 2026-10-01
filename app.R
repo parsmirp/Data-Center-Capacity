@@ -3,6 +3,7 @@
 # MASTER DATA:
 # DC.xlsx (THANOS EXCEL SHEET)
 
+
 # RUNTIME DATA:
 # dc_data.sqlite
 
@@ -37,6 +38,21 @@ library(jsonlite)
 
 DB_PATH <- "dc_data.sqlite"
 MASTER_FILE <- "DC.xlsx"
+
+## carto map api key
+CARTO_KEY <- Sys.getenv("CARTO_API_KEY")
+if (!nzchar(CARTO_KEY) && file.exists("carto_key.txt")) {
+  CARTO_KEY <- trimws(readLines("carto_key.txt", n=1, warn = FALSE))
+}
+CARTO_POSITRON_URL <- paste0(
+  "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+  if (nzchar(CARTO_KEY)) paste0("?key=", CARTO_KEY) else ""
+)
+CARTO_ATTRIBUTION <- paste0(
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ',
+  'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+)
+##
 
 REFRESH_PASSWORD <- Sys.getenv("DC_REFRESH_PASSWORD", unset = "bytebt")
 # Password required to click "Refresh from DC.xlsx".
@@ -1935,8 +1951,11 @@ server <- function(input, output, session) {
       minZoom = 2,
       maxZoom = 18
     )) %>%
-      addProviderTiles(providers$Esri.WorldGrayCanvas,
-                       options = providerTileOptions(noWrap = TRUE)) %>%
+      addTiles(
+        urlTemplate = CARTO_POSITRON_URL,
+        attribution = CARTO_ATTRIBUTION,
+        options = tileOptions(noWrap = TRUE)
+      ) %>%
       setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
       setView(lng = -98.5, lat = 39.5, zoom = 4) %>%
       addEasyButton(reset_view_button("map_reset"))
@@ -1954,8 +1973,20 @@ server <- function(input, output, session) {
     }
   }
   
+  reset_pipeline_view <- function() {
+    proxy <- leafletProxy("pipeline_map")
+    if (identical(input$pipeline_scope, "us")) {
+      proxy %>% setView(lng = -98.5, lat = 39.5, zoom = 4)
+    } else {
+      proxy %>% setView(lng = -20, lat = 25, zoom = 2)
+    }
+  }
+  
+  observeEvent(input$pipeline_scope, reset_pipeline_view(), ignoreInit = TRUE)
   observeEvent(input$scope, reset_map_view(), ignoreInit = TRUE)
+  
   observeEvent(input$map_reset, reset_map_view())
+  observeEvent(input$pipeline_map_reset, reset_pipeline_view())
   ##############################
   observe({
     df <- filtered() %>%
@@ -2038,14 +2069,18 @@ server <- function(input, output, session) {
       minZoom = 2,
       maxZoom = 18
     )) %>%
-      addProviderTiles(providers$Esri.WorldGrayCanvas,
-                       options = providerTileOptions(noWrap = TRUE)) %>%
+      addTiles(
+        urlTemplate = CARTO_POSITRON_URL,
+        attribution = CARTO_ATTRIBUTION,
+        options = tileOptions(noWrap = TRUE)
+      ) %>%
       setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
       setView(
         lng = if (identical(input$pipeline_scope, "us")) -98.5 else -20,
         lat = if (identical(input$pipeline_scope, "us")) 39.5 else 25,
         zoom = if (identical(input$pipeline_scope, "us")) 4 else 2
-      )
+      ) %>%
+      addEasyButton(reset_view_button("pipeline_map_reset"))
     
     if (nrow(df) == 0) {
       return(base_map)
