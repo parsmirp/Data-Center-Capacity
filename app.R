@@ -1,7 +1,7 @@
 # ============================================================
 # Data Center Capacity Dashboard
 # MASTER DATA:
-# DC.xlsx
+# DC.xlsx (THANOS EXCEL SHEET)
 
 # RUNTIME DATA:
 # dc_data.sqlite
@@ -37,6 +37,11 @@ library(jsonlite)
 
 DB_PATH <- "dc_data.sqlite"
 MASTER_FILE <- "DC.xlsx"
+
+REFRESH_PASSWORD <- Sys.getenv("DC_REFRESH_PASSWORD", unset = "bytebt")
+# Password required to click "Refresh from DC.xlsx".
+# Reads the DC_REFRESH_PASSWORD environment variable if set,
+# otherwise falls back to the value below.
 
 # ---------- Quarter columns ----------
 
@@ -1419,6 +1424,16 @@ ui <- page_sidebar(
 # ============================================================
 # SERVER
 # ============================================================
+reset_view_button <- function(input_id) {
+  easyButton(
+    icon = "fa-globe",
+    title = "Reset view",
+    onClick = JS(sprintf(
+      "function(btn, map) { Shiny.setInputValue('%s', Math.random(), {priority: 'event'}); }",
+      input_id
+    ))
+  )
+}
 
 server <- function(input, output, session) {
   # ----------------------------------------------------------
@@ -1923,21 +1938,24 @@ server <- function(input, output, session) {
       addProviderTiles(providers$Esri.WorldGrayCanvas,
                        options = providerTileOptions(noWrap = TRUE)) %>%
       setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
-      setView(lng = -98.5, lat = 39.5, zoom = 4)
+      setView(lng = -98.5, lat = 39.5, zoom = 4) %>%
+      addEasyButton(reset_view_button("map_reset"))
   })
   
   # Recenters the map when scope changes (US or global)
-  observeEvent(input$scope, {
+  # Recenters the map (used by the scope toggle and the reset button)
+  reset_map_view <- function() {
     proxy <- leafletProxy("map")
     
     if (identical(input$scope, "us")) {
-      proxy %>%
-        setView(lng = -98.5, lat = 39.5, zoom = 4)
+      proxy %>% setView(lng = -98.5, lat = 39.5, zoom = 4)
     } else {
-      proxy %>%
-        setView(lng = -20, lat = 25, zoom = 2)
+      proxy %>% setView(lng = -20, lat = 25, zoom = 2)
     }
-  }, ignoreInit = TRUE)
+  }
+  
+  observeEvent(input$scope, reset_map_view(), ignoreInit = TRUE)
+  observeEvent(input$map_reset, reset_map_view())
   ##############################
   observe({
     df <- filtered() %>%
@@ -2375,7 +2393,28 @@ server <- function(input, output, session) {
     )
   })
   
+  # Step 1: the button only opens a password prompt.
   observeEvent(input$refresh_excel, {
+    showModal(modalDialog(
+      title = "Password required",
+      passwordInput("refresh_pw", "Enter password to refresh from DC.xlsx"),
+      footer = tagList(
+        modalButton("Cancel"),
+        actionButton("confirm_refresh", "Refresh", class = "btn-primary")
+      ),
+      easyClose = TRUE
+    ))
+  })
+  
+  # Step 2: the refresh only runs if the password matches.
+  observeEvent(input$confirm_refresh, {
+    if (!identical(input$refresh_pw, REFRESH_PASSWORD)) {
+      showNotification("Incorrect password.", type = "error", duration = 5)
+      return()
+    }
+    
+    removeModal()
+    
     if (!file.exists(MASTER_FILE)) {
       showNotification(
         paste0("Could not find ", MASTER_FILE,
@@ -2417,7 +2456,6 @@ server <- function(input, output, session) {
       )
     })
   })
-  
   # ==========================================================
   # VERSION HISTORY TABLE
   # ==========================================================
@@ -2464,10 +2502,12 @@ server <- function(input, output, session) {
     showModal(modalDialog(
       title = paste("Restore version", v, "?"),
       
-      paste0(
+      p(paste0(
         "This will make version ", v, " live again. ",
         "The current data will be snapshotted first, so this is safe to undo."
-      ),
+      )),
+      
+      passwordInput("restore_pw", "Enter password to restore"),
       
       footer = tagList(
         modalButton("Cancel"),
@@ -2481,6 +2521,12 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$confirm_restore, {
+    # Wrong password: keep the dialog open so they can retry.
+    if (!identical(input$restore_pw, REFRESH_PASSWORD)) {
+      showNotification("Incorrect password.", type = "error", duration = 5)
+      return()
+    }
+    
     v <- session$userData$pending_restore
     
     req(v)
@@ -2496,7 +2542,6 @@ server <- function(input, output, session) {
     showNotification(paste("Restored version", v, "and set it live."), type = "message")
   })
 }
-
 # ============================================================
 # RUN APP
 # ============================================================
