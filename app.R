@@ -1057,6 +1057,11 @@ ui <- page_sidebar(
     color: #E2E8F0 !important;
     border-color: #1F2937 !important;
   }
+  .card-footer {
+  background-color: #111827 !important;
+  color: #E2E8F0 !important;
+  border-color: #1F2937 !important;
+}
 
   .bslib-value-box,
   .bslib-value-box .value-box-area,
@@ -1407,9 +1412,18 @@ ui <- page_sidebar(
         card_header("Map of Total Capacity"),
         leafletOutput("map", height = 520)
       ),
-      
-      card(card_header("Matching rows"), DTOutput("table"))
-    ),
+      card(
+        card_header("Matching rows"),
+        DTOutput("table"),
+        card_footer(
+          downloadButton(
+            "download_filtered",
+            "Download filtered results (CSV)",
+            class = "btn-outline-primary btn-sm"
+          )
+        )
+      )
+      ),
     
     # --------------------------------------------------------
     # UPCOMING CAPACITY
@@ -1457,9 +1471,16 @@ ui <- page_sidebar(
       
       card(
         card_header("Capacity coming available - chronological order"),
-        DTOutput("pipeline_table")
-      )
-    ),
+        DTOutput("pipeline_table"),
+        card_footer(
+          downloadButton(
+            "download_pipeline",
+            "Download filtered results (CSV)",
+            class = "btn-outline-primary btn-sm"
+          )
+        )
+        )
+      ),
     
     # --------------------------------------------------------
     # VERSION HISTORY
@@ -2341,8 +2362,9 @@ server <- function(input, output, session) {
   # ==========================================================
   # CURRENT TABLE
   # ==========================================================
-  
-  output$table <- renderDT({
+
+  # Shared so the table and the download always match
+  table_data <- reactive({
     filtered() %>%
       select(
         Operator,
@@ -2354,7 +2376,20 @@ server <- function(input, output, session) {
         `Capacity (MW est.)` = Capacity_MW_est
       ) %>%
       arrange(Operator, Country, State, City)
+  })
+  
+  output$table <- renderDT({
+    table_data()
   }, options = list(pageLength = 15), rownames = FALSE)
+  
+  output$download_filtered <- downloadHandler(
+    filename = function() {
+      paste0("data_centers_filtered_", format(Sys.Date(), "%Y%m%d"), ".csv")
+    },
+    content = function(file) {
+      write.csv(table_data(), file, row.names = FALSE, na = "")
+    }
+  )
   
   ##
   # UPCOMING CAPACITY BY QUARTER
@@ -2512,20 +2547,9 @@ server <- function(input, output, session) {
   # UPCOMING CAPACITY TABLE
   # ==========================================================
   
-  output$pipeline_table <- renderDT({
-    df <- filtered_pipeline()
-    
-    if (nrow(df) == 0) {
-      return(datatable(
-        tibble(Message = "No upcoming capacity matches the current filters."),
-        rownames = FALSE,
-        options = list(dom = "t")
-      ))
-    }
-    
-    # Long format: each Excel quarter is its own row, so every
-    # quarter from Q3 2026 onward appears as a chronological entry.
-    df <- df %>%
+  # Shared so the table and the download always match
+  pipeline_table_data <- reactive({
+    filtered_pipeline() %>%
       mutate(Quarter_Order = match(Quarter, QUARTER_COLS)) %>%
       arrange(Quarter_Order, Operator, Country, State, City_clean) %>%
       transmute(
@@ -2538,6 +2562,18 @@ server <- function(input, output, session) {
         `MW Available` = MW_available,
         Quarter_Order
       )
+  })
+  
+  output$pipeline_table <- renderDT({
+    df <- pipeline_table_data()
+    
+    if (nrow(df) == 0) {
+      return(datatable(
+        tibble(Message = "No upcoming capacity matches the current filters."),
+        rownames = FALSE,
+        options = list(dom = "t")
+      ))
+    }
     
     datatable(
       df,
@@ -2552,6 +2588,16 @@ server <- function(input, output, session) {
     )
   })
   
+  output$download_pipeline <- downloadHandler(
+    filename = function() {
+      paste0("upcoming_capacity_filtered_", format(Sys.Date(), "%Y%m%d"), ".csv")
+    },
+    content = function(file) {
+      pipeline_table_data() %>%
+        select(-Quarter_Order) %>%
+        write.csv(file, row.names = FALSE, na = "")
+    }
+  )
   # ==========================================================
   # REFRESH FROM DC.XLSX
   # ==========================================================
