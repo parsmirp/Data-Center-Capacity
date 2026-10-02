@@ -968,21 +968,27 @@ $(function() {
 CLUSTER_ICON_JS <- r"---(
 function(cluster) {
   var kids = cluster.getAllChildMarkers();
-  var best = null, anyOrange = false;
+  var best = null, anyOrange = false, anyGray = false;
   kids.forEach(function(m) {
     var o = m.options;
-    if (o.fillColor === '#F59E0B') anyOrange = true;
-    if (o.fillColor !== '#9CA3AF' &&
+    var fc = (o.fillColor || '').toUpperCase();
+    if (fc === '#F59E0B') anyOrange = true;
+    if (fc === '#9CA3AF') anyGray = true;
+    if (fc !== '#9CA3AF' && fc !== '#FFFFFF' &&
         (best === null || o.radius > best.options.radius)) best = m;
   });
   var col = anyOrange ? '#F59E0B'
-          : (best ? best.options.fillColor : '#9CA3AF');
+          : (best ? best.options.fillColor
+          : (anyGray ? '#9CA3AF' : '#FFFFFF'));
+  var isWhite = (String(col).toUpperCase() === '#FFFFFF');
   var n = cluster.getChildCount();
   return L.divIcon({
-    html: '<div style="background:' + col + ';color:#fff;' +
-          'text-shadow:0 0 3px #000;font-weight:700;width:36px;' +
-          'height:36px;line-height:36px;border-radius:50%;' +
-          'text-align:center;border:2px solid rgba(255,255,255,.6);' +
+    html: '<div style="background:' + col + ';' +
+          'color:' + (isWhite ? '#111827' : '#fff') + ';' +
+          'text-shadow:' + (isWhite ? 'none' : '0 0 3px #000') + ';' +
+          'font-weight:700;width:36px;height:36px;line-height:36px;' +
+          'border-radius:50%;text-align:center;' +
+          'border:2px solid ' + (isWhite ? '#6B7280' : 'rgba(255,255,255,.6)') + ';' +
           'opacity:.9">' + n + '</div>',
     className: '',
     iconSize: L.point(36, 36)
@@ -2077,17 +2083,18 @@ server <- function(input, output, session) {
         key = paste(Operator, City_clean, State, Country, sep = "|"),
         is_upcoming_soon = if (isTRUE(highlight_on())) key %in% keys else FALSE,
         
-        # "Not current" = no usable current capacity
+        # Three capacity states
         has_capacity = !is.na(Capacity_MW_est) & Capacity_MW_est > 0,
+        is_zero      = !is.na(Capacity_MW_est) & Capacity_MW_est == 0,
+        no_info      = is.na(Capacity_MW_est),
         
         op_txt = htmltools::htmlEscape(enc2utf8(coalesce(Operator, "Unknown operator"))),
         city_txt = htmltools::htmlEscape(enc2utf8(coalesce(City_clean, ""))),
         place_txt = htmltools::htmlEscape(enc2utf8(
           if_else(is.na(State) | State == "", coalesce(Country, ""), State)
         )),
-        cap_txt = htmltools::htmlEscape(enc2utf8(coalesce(Capacity, "n/a"))),
+        cap_txt = htmltools::htmlEscape(enc2utf8(coalesce(Capacity, "No info"))),
         cool_txt = htmltools::htmlEscape(enc2utf8(coalesce(Cooling, "Unknown"))),
-        
         popup_html = paste0(
           "<div style='min-width:200px'>",
           "<b>", op_txt, "</b><br>",
@@ -2137,7 +2144,8 @@ server <- function(input, output, session) {
         fill_col = case_when(
           is_upcoming_soon ~ "#F59E0B",       # orange when highlighted
           has_capacity     ~ pal(heat_val),   # heat color
-          TRUE             ~ "#9CA3AF"        # gray
+          is_zero          ~ "#E5E7EB",       # lighter gray, 0 MW
+          TRUE             ~ "#9CA3AF"        # darker gray - no info
         ),
         border_col = case_when(
           is_upcoming_soon ~ "#FCD34D",
@@ -2170,7 +2178,7 @@ server <- function(input, output, session) {
       )
     
     # ---- Custom legend: gradient bar + gray / orange dots ----
-    any_gray <- any(!df$has_capacity)
+    any_gray  <- any(df$no_info)
     any_orange <- any(df$is_upcoming_soon)
     
     legend_html <- paste0(
@@ -2187,7 +2195,7 @@ server <- function(input, output, session) {
       if (any_gray) paste0(
         "<div class='dc-legend-row'>",
         "<span class='dc-legend-dot' style='background:#9CA3AF'></span>",
-        "Not current</div>"
+        "No info</div>"
       ) else "",
       
       if (any_orange) paste0(
