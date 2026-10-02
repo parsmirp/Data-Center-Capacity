@@ -960,6 +960,36 @@ $(function() {
 });
 )---"
 
+# Custom cluster-bubble icon for the Data Centers map.
+# Bubble color:
+#   orange  -> any site inside is highlighted (coming online soon)
+#   heat    -> color of the largest current site inside
+#   gray    -> everything inside has no current capacity
+CLUSTER_ICON_JS <- r"---(
+function(cluster) {
+  var kids = cluster.getAllChildMarkers();
+  var best = null, anyOrange = false;
+  kids.forEach(function(m) {
+    var o = m.options;
+    if (o.fillColor === '#F59E0B') anyOrange = true;
+    if (o.fillColor !== '#9CA3AF' &&
+        (best === null || o.radius > best.options.radius)) best = m;
+  });
+  var col = anyOrange ? '#F59E0B'
+          : (best ? best.options.fillColor : '#9CA3AF');
+  var n = cluster.getChildCount();
+  return L.divIcon({
+    html: '<div style="background:' + col + ';color:#fff;' +
+          'text-shadow:0 0 3px #000;font-weight:700;width:36px;' +
+          'height:36px;line-height:36px;border-radius:50%;' +
+          'text-align:center;border:2px solid rgba(255,255,255,.6);' +
+          'opacity:.9">' + n + '</div>',
+    className: '',
+    iconSize: L.point(36, 36)
+  });
+}
+)---"
+
 # A range slider with two editable number boxes on top.
 # Drag the slider OR type exact values in the boxes; they stay in sync
 # (see sync_range() in the server).
@@ -1184,6 +1214,34 @@ ui <- page_sidebar(
     text-align: center; font-weight: 600; color: #60A5FA !important;
   }
   .range-dash { color: #64748B; }
+
+  /* ---------- Data Centers map legend ---------- */
+  .dc-legend {
+    background: rgba(255,255,255,.94);
+    color: #1F2937;
+    padding: 8px 12px;
+    border-radius: 8px;
+    box-shadow: 0 1px 5px rgba(0,0,0,.35);
+    font-size: 12px;
+    line-height: 1.3;
+    min-width: 150px;
+  }
+  .dc-legend-title { font-weight: 700; margin-bottom: 5px; }
+  .dc-legend-bar {
+    height: 10px; border-radius: 5px;
+    background: linear-gradient(to right, #DBEAFE, #60A5FA, #1D4ED8, #0A1A4A);
+  }
+  .dc-legend-scale {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: #4B5563; margin-top: 2px;
+  }
+  .dc-legend-row {
+    display: flex; align-items: center; gap: 7px; margin-top: 6px;
+  }
+  .dc-legend-dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    display: inline-block; flex: none;
+  }
 "
     ),
   
@@ -1987,6 +2045,14 @@ server <- function(input, output, session) {
   
   observeEvent(input$map_reset, reset_map_view())
   observeEvent(input$pipeline_map_reset, reset_pipeline_view())
+  
+  ##############################
+  # DATA CENTERS MAP MARKERS
+  #  - Heat colors + sizes by current MW (same palette as Upcoming map)
+  #  - Sites with no current capacity are gray
+  #  - "Highlight coming soon" turns sites arriving in the next
+  #    4 quarters orange (gray ones included)
+  #  - Nearby dots cluster; bubbles are colored to match
   ##############################
   observe({
     df <- filtered() %>%
@@ -2010,6 +2076,9 @@ server <- function(input, output, session) {
       mutate(
         key = paste(Operator, City_clean, State, Country, sep = "|"),
         is_upcoming_soon = if (isTRUE(highlight_on())) key %in% keys else FALSE,
+        
+        # "Not current" = no usable current capacity
+        has_capacity = !is.na(Capacity_MW_est) & Capacity_MW_est > 0,
         
         op_txt = htmltools::htmlEscape(enc2utf8(coalesce(Operator, "Unknown operator"))),
         city_txt = htmltools::htmlEscape(enc2utf8(coalesce(City_clean, ""))),
@@ -2035,25 +2104,103 @@ server <- function(input, output, session) {
         label_txt = paste0(op_txt, " \u2014 ", city_txt)
       )
     
-    leafletProxy("map", data = df) %>%
+    proxy <- leafletProxy("map") %>%
       clearMarkers() %>%
       clearMarkerClusters() %>%
+      clearControls()
+    
+    if (nrow(df) == 0) return()
+    
+    # ---- Heat palette (same colors as the Upcoming Capacity map) ----
+    cap_vals <- df$Capacity_MW_est[df$has_capacity]
+    min_mw <- suppressWarnings(min(cap_vals, na.rm = TRUE))
+    max_mw <- suppressWarnings(max(cap_vals, na.rm = TRUE))
+    if (!is.finite(min_mw)) min_mw <- 0
+    if (!is.finite(max_mw)) max_mw <- min_mw + 1
+    if (min_mw == max_mw) max_mw <- min_mw + 1
+    
+    pal <- colorNumeric(
+      palette = c("#DBEAFE", "#60A5FA", "#1D4ED8", "#0A1A4A"),
+      domain = c(min_mw, max_mw),
+      na.color = "#9CA3AF"
+    )
+    
+    heat_val <- ifelse(df$has_capacity, df$Capacity_MW_est, NA_real_)
+    
+    df <- df %>%
+      mutate(
+        radius = if_else(
+          has_capacity,
+          6 + 12 * sqrt((Capacity_MW_est - min_mw) / (max_mw - min_mw)),
+          6
+        ),
+        fill_col = case_when(
+          is_upcoming_soon ~ "#F59E0B",       # orange when highlighted
+          has_capacity     ~ pal(heat_val),   # heat color
+          TRUE             ~ "#9CA3AF"        # gray
+        ),
+        border_col = case_when(
+          is_upcoming_soon ~ "#FCD34D",
+          has_capacity     ~ "#BFDBFE",
+          TRUE             ~ "#D1D5DB"
+        )
+      ) %>%
+      # Large sites draw first; small / gray ones land on top
+      arrange(desc(has_capacity), desc(Capacity_MW_est))
+    
+    proxy %>%
       addCircleMarkers(
+        data = df,
         lng = ~map_lng,
         lat = ~map_lat,
-        radius = 8,
+        radius = ~radius,
+        stroke = TRUE,
+        weight = 1.5,
+        color = ~border_col,
+        fillColor = ~fill_col,
         fillOpacity = 0.85,
-        color = ~ifelse(is_upcoming_soon, "#F59E0B", "#60A5FA"),
-        fillColor = ~ifelse(is_upcoming_soon, "#F59E0B", "#3B82F6"),
-        weight = 2,
         popup = ~popup_html,
         label = ~lapply(label_txt, htmltools::HTML),
         clusterOptions = markerClusterOptions(
           disableClusteringAtZoom = 14,
           spiderfyOnMaxZoom = FALSE,
-          maxClusterRadius = 40
+          maxClusterRadius = 40,
+          iconCreateFunction = JS(CLUSTER_ICON_JS)
         )
       )
+    
+    # ---- Custom legend: gradient bar + gray / orange dots ----
+    any_gray <- any(!df$has_capacity)
+    any_orange <- any(df$is_upcoming_soon)
+    
+    legend_html <- paste0(
+      "<div class='dc-legend'>",
+      
+      if (length(cap_vals) > 0) paste0(
+        "<div class='dc-legend-title'>Current capacity</div>",
+        "<div class='dc-legend-bar'></div>",
+        "<div class='dc-legend-scale'><span>",
+        format(round(min_mw), big.mark = ","), " MW</span><span>",
+        format(round(max_mw), big.mark = ","), " MW</span></div>"
+      ) else "",
+      
+      if (any_gray) paste0(
+        "<div class='dc-legend-row'>",
+        "<span class='dc-legend-dot' style='background:#9CA3AF'></span>",
+        "Not current</div>"
+      ) else "",
+      
+      if (any_orange) paste0(
+        "<div class='dc-legend-row'>",
+        "<span class='dc-legend-dot' style='background:#F59E0B'></span>",
+        "Coming online in next 4 quarters</div>"
+      ) else "",
+      
+      "</div>"
+    )
+    
+    proxy %>%
+      addControl(html = legend_html, position = "bottomright", className = "")
   })
   
   # ==========================================================
