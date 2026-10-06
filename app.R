@@ -71,6 +71,7 @@ QUARTER_COLS <- c(
 # ---------- Optional master-file columns ----------
 
 MASTER_OPTIONAL_COLS <- c(
+  "Address",
   "City",
   "State/Province",
   "Region",
@@ -129,6 +130,11 @@ country_centroids <- tribble(
   "Sweden/Norway",          61.3,       11.8
 )
 
+MANUAL_COORDS <- tribble(
+  ~key,                           ~Latitude, ~Longitude,
+  "Santa Clara|CA|United States",  37.3541,  -121.9552
+)
+
 # ============================================================
 # PARSING HELPERS
 # ============================================================
@@ -184,6 +190,48 @@ quarter_to_date <- function(q) {
     NA_character_,
     sprintf("%04d-%02d-01", yr, month)
   ))
+}
+
+# ============================================================
+# SEARCH HELPERS
+# ============================================================
+# Search syntax:
+#   equinix texas      -> every word must match somewhere in the row
+#   "digital realty"   -> exact phrase (quotes)
+# Each field is matched separately, so words never "stitch" across
+# two different columns.
+
+parse_search_terms <- function(term) {
+  term <- str_to_lower(term)
+  
+  # Quoted phrases (an unfinished quote is treated as a phrase too)
+  m <- str_match_all(term, '"([^"]*)"?')[[1]]
+  phrases <- if (nrow(m) > 0) trimws(m[, 2]) else character(0)
+  phrases <- phrases[nzchar(phrases)]
+  
+  # Everything outside quotes is split into single words
+  rest <- trimws(str_replace_all(term, '"[^"]*"?', " "))
+  words <- if (nzchar(rest)) str_split(rest, "\\s+")[[1]] else character(0)
+  words <- words[nzchar(words)]
+  
+  c(phrases, words)
+}
+
+# Zoom a leaflet map (or proxy) to a set of points.
+fit_points <- function(map, lat, lng) {
+  ok <- is.finite(lat) & is.finite(lng)
+  lat <- lat[ok]
+  lng <- lng[ok]
+  
+  if (length(lat) == 0) {
+    return(map)
+  }
+  
+  if (min(lat) == max(lat) && min(lng) == max(lng)) {
+    map %>% setView(lng = lng[1], lat = lat[1], zoom = 9)
+  } else {
+    map %>% fitBounds(min(lng), min(lat), max(lng), max(lat))
+  }
 }
 
 # ============================================================
@@ -317,6 +365,7 @@ clean_master_df <- function(raw) {
     transmute(
       Operator = `DC Operator`,
       City = City,
+      Address = Address,
       State = `State/Province`,
       Country = Country,
       Region = Region,
@@ -401,103 +450,82 @@ save_geocode_cache <- function(cache_df) {
 # Existing cached cities are instantaneous.
 # New cities use OSM if tidygeocoder is installed.
 
-geocode_current <- function(current_df,
-                            existing_current = NULL,
-                            progress_fn = NULL) {
+# Address rows get their own cache key; all others stay city-level.
+geo_key <- function(df) {
+  addr <- if ("Address" %in% names(df)) df$Address else rep(NA_character_, nrow(df))
+  ifelse(
+    !is.na(addr),
+    paste("ADDR", addr, df$City_clean, df$State, df$Country, sep = "|"),
+    paste(df$City_clean, df$State, df$Country, sep = "|")
+  )
+}
+
+geocode_current <- function(current_df, existing_current = NULL, progress_fn = NULL) {
+  if (!"Address" %in% names(current_df)) current_df$Address <- NA_character_
   cache <- load_geocode_cache()
   
-  # Preserve coordinates already stored in SQLite.
   if (!is.null(existing_current) &&
-      all(c("City_clean", "State", "Country", "Latitude", "Longitude") %in%
-          names(existing_current))) {
+      all(c("City_clean", "State", "Country", "Latitude", "Longitude") %in% names(existing_current))) {
     existing_coords <- existing_current %>%
       filter(!is.na(Latitude), !is.na(Longitude)) %>%
-      transmute(
-        key = paste(City_clean, State, Country, sep = "|"),
-        Latitude = as.numeric(Latitude),
-        Longitude = as.numeric(Longitude)
-      ) %>%
+      mutate(key = geo_key(.), Latitude = as.numeric(Latitude), Longitude = as.numeric(Longitude)) %>%
+      select(key, Latitude, Longitude) %>%
       distinct(key, .keep_all = TRUE)
-    
-    cache <- bind_rows(cache, existing_coords) %>%
-      distinct(key, .keep_all = TRUE)
+    cache <- bind_rows(cache, existing_coords) %>% distinct(key, .keep_all = TRUE)
   }
   
-  # Find cities not already cached.
+  # Hand-verified coordinates always win
+  cache <- bind_rows(MANUAL_COORDS, cache) %>% distinct(key, .keep_all = TRUE)
+  
   to_geocode <- current_df %>%
     filter(!is.na(City)) %>%
-    distinct(City_clean, State, Country) %>%
-    mutate(key = paste(City_clean, State, Country, sep = "|")) %>%
+    mutate(key = geo_key(.)) %>%
+    distinct(key, .keep_all = TRUE) %>%
     filter(!key %in% cache$key)
   
   new_rows <- tibble()
-  
-  # Geocode new cities.
-  if (nrow(to_geocode) > 0 &&
-      requireNamespace("tidygeocoder", quietly = TRUE)) {
+  if (nrow(to_geocode) > 0 && requireNamespace("tidygeocoder", quietly = TRUE)) {
     for (i in seq_len(nrow(to_geocode))) {
       r <- to_geocode[i, ]
+      addr <- paste(na.omit(c(r$Address, r$City_clean, r$State, r$Country)), collapse = ", ")
+      if (!is.null(progress_fn)) progress_fn(i, nrow(to_geocode), addr)
       
-      addr <- paste(na.omit(c(r$City_clean, r$State, r$Country)), collapse = ", ")
-      
-      if (!is.null(progress_fn)) {
-        progress_fn(i, nrow(to_geocode), addr)
+      res <- tryCatch(tidygeocoder::geo(address = addr, method = "osm", quiet = TRUE),
+                      error = function(e) NULL)
+      if (!is.null(res) && nrow(res) > 0 && !is.na(res$lat[1]) && !is.na(res$long[1])) {
+        new_rows <- bind_rows(new_rows, tibble(
+          key = r$key, Latitude = as.numeric(res$lat[1]), Longitude = as.numeric(res$long[1])))
+        cat(sprintf("  -> %s : %.4f, %.4f\n", addr, res$lat[1], res$long[1]))
       }
-      
-      res <- tryCatch(
-        tidygeocoder::geo(address = addr, method = "osm", quiet = TRUE),
-        error = function(e) NULL
-      )
-      
-      if (!is.null(res) &&
-          nrow(res) > 0 &&
-          !is.na(res$lat[1]) &&
-          !is.na(res$long[1])) {
-        new_rows <- bind_rows(
-          new_rows,
-          tibble(
-            key = r$key,
-            Latitude = as.numeric(res$lat[1]),
-            Longitude = as.numeric(res$long[1])
-          )
-        )
-      }
-      
-      # Nominatim rate limit.
       Sys.sleep(1)
     }
   }
   
-  # Save newly geocoded cities.
   if (nrow(new_rows) > 0) {
-    cache <- bind_rows(cache, new_rows) %>%
-      distinct(key, .keep_all = TRUE)
-    
+    cache <- bind_rows(cache, new_rows) %>% distinct(key, .keep_all = TRUE)
     save_geocode_cache(cache)
   }
   
-  # Apply coordinates.
   current_df %>%
-    mutate(key = paste(City_clean, State, Country, sep = "|")) %>%
+    mutate(key = geo_key(.), city_key = paste(City_clean, State, Country, sep = "|")) %>%
     left_join(cache %>% select(key, Latitude, Longitude), by = "key") %>%
-    left_join(
-      country_centroids %>%
-        rename(Country_Lat = Latitude, Country_Lon = Longitude),
-      by = "Country"
-    ) %>%
+    left_join(cache %>% select(city_key = key, City_Lat = Latitude, City_Lon = Longitude),
+              by = "city_key") %>%
+    left_join(country_centroids %>% rename(Country_Lat = Latitude, Country_Lon = Longitude),
+              by = "Country") %>%
     mutate(
       Latitude = case_when(
         !is.na(Latitude) ~ Latitude,
+        !is.na(City_Lat) ~ City_Lat,
         is.na(City) & !is.na(Country_Lat) ~ Country_Lat,
-        TRUE ~ NA_real_
-      ),
+        TRUE ~ NA_real_),
       Longitude = case_when(
         !is.na(Longitude) ~ Longitude,
+        !is.na(City_Lon) ~ City_Lon,
         is.na(City) & !is.na(Country_Lon) ~ Country_Lon,
-        TRUE ~ NA_real_
-      )
+        TRUE ~ NA_real_)
     ) %>%
-    select(-key, -Country_Lat, -Country_Lon)
+    select(-key, -city_key, -City_Lat, -City_Lon, -Country_Lat, -Country_Lon)
 }
 
 # ============================================================
@@ -578,6 +606,7 @@ load_current <- function() {
   # Make sure expected columns exist.
   defaults <- list(
     Operator = NA_character_,
+    Address = NA_character_,
     City = NA_character_,
     State = NA_character_,
     Country = NA_character_,
@@ -957,6 +986,175 @@ $(function() {
       .find('.hl-label')
       .text(on ? 'Highlighting coming soon' : 'Highlight coming soon');
   });
+
+  // ==========================================================
+  // SEARCH BAR
+  //  - autocomplete suggestions (operators, cities, states, countries)
+  //  - arrow keys + Enter to pick, Esc to close / clear / leave
+  //  - "/" or Ctrl/Cmd+K focuses the box from anywhere
+  //  - clear button appears while there is text
+  // ==========================================================
+  var SUG = [];        // [{t: 'Equinix', k: 'Operator'}, ...]
+  var shown = [];      // suggestions currently displayed
+  var active = -1;     // keyboard-highlighted suggestion
+
+  function $inp() { return $('#global_search'); }
+  function $box() { return $('#sb_suggest'); }
+
+  function syncHasText() {
+    var v = $inp().val() || '';
+    $('.sb-search').toggleClass('has-text', v.length > 0);
+  }
+
+  function hideSuggest() {
+    $box().removeClass('open').empty();
+    $inp().attr('aria-expanded', 'false');
+    shown = [];
+    active = -1;
+  }
+
+  function highlightInto($el, text, q) {
+    var i = q ? text.toLowerCase().indexOf(q) : -1;
+    if (i < 0) { $el.text(text); return; }
+    $el.append(document.createTextNode(text.slice(0, i)));
+    $el.append($('<mark>').text(text.slice(i, i + q.length)));
+    $el.append(document.createTextNode(text.slice(i + q.length)));
+  }
+
+  function renderSuggest() {
+    var raw = $inp().val() || '';
+    var q = raw.replace(/"/g, '').trim().toLowerCase();
+    if (!q || document.activeElement !== $inp()[0]) { hideSuggest(); return; }
+
+    var starts = [], inside = [];
+    for (var i = 0; i < SUG.length; i++) {
+      var p = SUG[i].t.toLowerCase().indexOf(q);
+      if (p === 0) starts.push(SUG[i]);
+      else if (p > 0) inside.push(SUG[i]);
+      if (starts.length >= 8) break;
+    }
+    shown = starts.concat(inside).slice(0, 8);
+
+    if (!shown.length) { hideSuggest(); return; }
+
+    var $b = $box().empty();
+    shown.forEach(function(s, idx) {
+      var $it = $('<div class="sb-sug-item" role="option"></div>').attr('data-i', idx);
+      var $t = $('<span class="sb-sug-text"></span>');
+      highlightInto($t, s.t, q);
+      $it.append($t, $('<span class="sb-sug-type"></span>').text(s.k));
+      $b.append($it);
+    });
+    active = -1;
+    $b.addClass('open');
+    $inp().attr('aria-expanded', 'true');
+  }
+
+  function setActive(n) {
+    var $items = $box().children('.sb-sug-item');
+    if (!$items.length) return;
+    active = (n + $items.length) % $items.length;
+    $items.removeClass('active').eq(active).addClass('active');
+    var el = $items.eq(active)[0];
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+  }
+
+  function choose(i) {
+    var s = shown[i];
+    if (!s) return;
+    // Multi-word picks become an exact phrase so "New York" stays together
+    var v = /\s/.test(s.t) ? '"' + s.t + '"' : s.t;
+    $inp().val(v).trigger('input');
+    hideSuggest();
+    $inp().focus();
+  }
+
+  // Suggestion list pushed from the server
+  Shiny.addCustomMessageHandler('search_suggest', function(m) {
+    var l = [].concat(m.labels || []);
+    var k = [].concat(m.types || []);
+    SUG = l.map(function(x, i) { return { t: String(x), k: k[i] }; });
+  });
+
+  // One-time input attributes (no browser autofill, screen-reader roles)
+  $inp().attr({
+    autocomplete: 'off',
+    spellcheck: 'false',
+    role: 'combobox',
+    'aria-autocomplete': 'list',
+    'aria-controls': 'sb_suggest',
+    'aria-expanded': 'false'
+  });
+  syncHasText();
+
+  $(document).on('input focusin', '#global_search', function() {
+    syncHasText();
+    renderSuggest();
+  });
+
+  $(document).on('focusout', '#global_search', function() {
+    setTimeout(hideSuggest, 120);
+  });
+
+  // Keeps the clear button right after programmatic changes (Reset button)
+  $(document).on('shiny:inputchanged', function(e) {
+    if (e.name === 'global_search') {
+      $('.sb-search').toggleClass('has-text', !!e.value && String(e.value).length > 0);
+    }
+  });
+
+  $(document).on('keydown', '#global_search', function(e) {
+    var open = $box().hasClass('open');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!open) renderSuggest();
+      setActive(active + 1);
+    } else if (e.key === 'ArrowUp') {
+      if (open) {
+        e.preventDefault();
+        setActive(active < 0 ? shown.length - 1 : active - 1);
+      }
+    } else if (e.key === 'Enter') {
+      if (open && active >= 0) { e.preventDefault(); choose(active); }
+      else hideSuggest();
+    } else if (e.key === 'Escape') {
+      if (open) hideSuggest();
+      else if (this.value) $(this).val('').trigger('input');
+      else this.blur();
+    }
+  });
+
+  $(document).on('mousedown', '.sb-sug-item', function(e) {
+    e.preventDefault();
+    choose(parseInt($(this).attr('data-i'), 10));
+  });
+
+  $(document).on('mousemove', '.sb-sug-item', function() {
+    var n = parseInt($(this).attr('data-i'), 10);
+    if (n !== active) setActive(n);
+  });
+
+  $(document).on('click', '#sb_search_clear', function(e) {
+    e.preventDefault();
+    $inp().val('').trigger('input');
+    hideSuggest();
+    $inp().focus();
+  });
+
+  // "/" or Ctrl/Cmd+K jumps to the search box
+  $(document).on('keydown', function(e) {
+    var t = e.target || {};
+    var tag = (t.tagName || '').toLowerCase();
+    var typing = tag === 'input' || tag === 'textarea' || tag === 'select' ||
+                 t.isContentEditable;
+    var isK = (e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'k';
+    if ((e.key === '/' && !typing) || isK) {
+      if ($inp().is(':visible')) {
+        e.preventDefault();
+        $inp().focus().select();
+      }
+    }
+  });
 });
 )---"
 
@@ -1156,6 +1354,112 @@ ui <- page_sidebar(
   .sb-summary-main { font-size: 13px; color: #CBD5E1; }
   .sb-summary-main b { font-size: 22px; color: #60A5FA; }
 
+  /* ---------- Search bar ---------- */
+  .sb-search { position: relative; margin-bottom: 12px; }
+  .sb-search .form-group,
+  .sb-search .shiny-input-container {
+    margin: 0 !important; width: 100% !important;
+  }
+  .sb-search input#global_search {
+    height: 42px;
+    padding: 0 44px 0 40px;
+    border-radius: 999px !important;
+    background-color: #0B0F14 !important;
+    border: 1px solid #263244 !important;
+    color: #E2E8F0 !important;
+    font-size: 13.5px;
+    transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
+  }
+  .sb-search input#global_search::placeholder { color: #64748B; }
+  .sb-search input#global_search:hover { border-color: #3B4A60 !important; }
+  .sb-search input#global_search:focus {
+    border-color: #3B82F6 !important;
+    background-color: #0D131B !important;
+    box-shadow: 0 0 0 .22rem rgba(59,130,246,.22) !important;
+    outline: none;
+  }
+
+  .sb-search-icon {
+    position: absolute; left: 15px; top: 50%;
+    transform: translateY(-50%);
+    color: #64748B; font-size: 13px;
+    pointer-events: none; z-index: 3;
+    transition: color .15s ease;
+  }
+  .sb-search:focus-within .sb-search-icon { color: #60A5FA; }
+
+  .sb-search-kbd {
+    position: absolute; right: 12px; top: 50%;
+    transform: translateY(-50%);
+    min-width: 22px; height: 22px; padding: 0 6px;
+    line-height: 20px; text-align: center;
+    border: 1px solid #334155; border-bottom-width: 2px; border-radius: 6px;
+    background: #111827; color: #94A3B8;
+    font-family: inherit; font-size: 11px; font-weight: 600;
+    pointer-events: none; z-index: 3;
+  }
+  .sb-search:focus-within .sb-search-kbd,
+  .sb-search.has-text .sb-search-kbd { display: none; }
+  @media (hover: none) { .sb-search-kbd { display: none; } }
+
+  .sb-search-clear {
+    position: absolute; right: 10px; top: 50%;
+    transform: translateY(-50%);
+    width: 22px; height: 22px; padding: 0; border: 0;
+    line-height: 21px; text-align: center; border-radius: 50%;
+    background: #1E293B; color: #94A3B8;
+    font-size: 15px; font-weight: 700;
+    display: none; z-index: 3; cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .sb-search-clear:hover { background: #334155; color: #F87171; }
+  .sb-search-clear:focus-visible { outline: 2px solid #3B82F6; outline-offset: 2px; }
+  .sb-search.has-text .sb-search-clear { display: block; }
+
+  .sb-suggest {
+    display: none;
+    position: absolute; left: 0; right: 0; top: calc(100% + 6px);
+    z-index: 1050;
+    max-height: 320px; overflow-y: auto;
+    padding: 5px;
+    background: #111827;
+    border: 1px solid #263244; border-radius: 12px;
+    box-shadow: 0 14px 32px rgba(0,0,0,.55);
+  }
+  .sb-suggest.open { display: block; }
+  .sb-sug-item {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 7px 10px; border-radius: 8px;
+    font-size: 13px; color: #CBD5E1; cursor: pointer;
+  }
+  .sb-sug-item.active { background: rgba(59,130,246,.18); color: #F1F5F9; }
+  .sb-sug-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sb-sug-text mark {
+    background: transparent; color: #60A5FA; font-weight: 700; padding: 0;
+  }
+  .sb-sug-type {
+    flex: none; padding: 1px 8px;
+    font-size: 11px; color: #64748B;
+    border: 1px solid #1F2937; border-radius: 999px;
+  }
+  .sb-sug-item.active .sb-sug-type { border-color: #3B82F6; color: #93C5FD; }
+
+  .sb-search-status {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin: -4px 4px 12px;
+    font-size: 12px; line-height: 1.4; color: #94A3B8;
+  }
+  .sb-search-status b { color: #E2E8F0; font-weight: 600; }
+  .sb-search-status .sb-dot {
+    flex: none; width: 7px; height: 7px; margin-top: 5px;
+    border-radius: 50%; background: #22C55E;
+    box-shadow: 0 0 6px rgba(34,197,94,.6);
+  }
+  .sb-search-status.is-empty { color: #FBBF24; }
+  .sb-search-status.is-empty .fa,
+  .sb-search-status.is-empty svg { flex: none; margin-top: 3px; }
+  .sb-search-status.is-empty b { color: #FDE68A; }
+
   .sb-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 
   .sb-chips { margin-bottom: 8px; }
@@ -1265,6 +1569,29 @@ ui <- page_sidebar(
     open = "desktop",
     
     uiOutput("sb_summary"),
+    
+    # ---------------- Search (Data Centers + Upcoming Capacity) ----------------
+    conditionalPanel(
+      condition = "input.main_tabs != 'Version History'",
+      
+      div(
+        class = "sb-search",
+        tags$span(class = "sb-search-icon", icon("magnifying-glass")),
+        textInput(
+          "global_search", NULL, width = "100%",
+          placeholder = "Search operator, city, state, country"
+        ),
+        tags$kbd(class = "sb-search-kbd", "/"),
+        tags$button(
+          type = "button", id = "sb_search_clear", class = "sb-search-clear",
+          `aria-label` = "Clear search", title = "Clear search (Esc)",
+          HTML("&times;")
+        ),
+        div(id = "sb_suggest", class = "sb-suggest", role = "listbox")
+      ),
+      
+      uiOutput("search_status")
+    ),
     
     # ---------------- Data Centers filters ----------------
     conditionalPanel(
@@ -1423,7 +1750,7 @@ ui <- page_sidebar(
           )
         )
       )
-      ),
+    ),
     
     # --------------------------------------------------------
     # UPCOMING CAPACITY
@@ -1479,8 +1806,8 @@ ui <- page_sidebar(
             class = "btn-outline-primary btn-sm"
           )
         )
-        )
-      ),
+      )
+    ),
     
     # --------------------------------------------------------
     # VERSION HISTORY
@@ -1553,6 +1880,74 @@ server <- function(input, output, session) {
   # Current maximum of each range slider (used to clamp typed values)
   cap_slider_max <- reactiveVal(100)
   pipe_slider_max <- reactiveVal(100)
+  
+  # ----------------------------------------------------------
+  # Search
+  # ----------------------------------------------------------
+  
+  # Debounced so the map and tables don't rebuild on every keystroke
+  search_raw_d <- debounce(
+    reactive({
+      s <- input$global_search
+      if (is.null(s)) "" else trimws(s)
+    }),
+    250
+  )
+  
+  # Keeps rows where EVERY search token appears in at least one of `cols`
+  apply_search <- function(df, cols) {
+    term <- search_raw_d()
+    
+    if (!nzchar(term) || nrow(df) == 0) {
+      return(df)
+    }
+    
+    tokens <- parse_search_terms(term)
+    
+    if (length(tokens) == 0) {
+      return(df)
+    }
+    
+    cols <- intersect(cols, names(df))
+    
+    hay <- do.call(paste, c(
+      lapply(df[cols], function(x) str_to_lower(coalesce(as.character(x), ""))),
+      sep = " | "
+    ))
+    
+    keep <- Reduce(`&`, lapply(tokens, function(t) str_detect(hay, fixed(t))))
+    
+    df[keep, ]
+  }
+  
+  # Autocomplete suggestions: operators, cities, states, countries
+  observeEvent(list(raw_data(), raw_pipeline()), {
+    cur_df <- raw_data()
+    pl_df <- raw_pipeline()
+    
+    pick <- function(x, type) {
+      x <- unique(as.character(x))
+      x <- sort(x[!is.na(x) & nzchar(x)])
+      tibble(label = x, type = rep(type, length(x)))
+    }
+    
+    pl_city <- pl_df$City_clean[
+      !is.na(pl_df$City_clean) &
+        !str_ends(pl_df$City_clean, fixed(" (no city provided)"))
+    ]
+    
+    sug <- bind_rows(
+      pick(c(cur_df$Operator, pl_df$Operator), "Operator"),
+      pick(c(cur_df$City, pl_city), "City"),
+      pick(c(cur_df$State, pl_df$State), "State"),
+      pick(c(cur_df$Country, pl_df$Country), "Country")
+    )
+    
+    session$sendCustomMessage(
+      "search_suggest",
+      list(labels = unname(sug$label), types = unname(sug$type))
+    )
+  }, ignoreNULL = FALSE)
   
   # ----------------------------------------------------------
   # Location filter
@@ -1729,6 +2124,43 @@ server <- function(input, output, session) {
     )
   })
   
+  # Search feedback: how many results, or what to try when there are none
+  output$search_status <- renderUI({
+    term <- search_raw_d()
+    
+    if (!nzchar(term)) {
+      return(NULL)
+    }
+    
+    on_pipeline <- identical(input$main_tabs, "Upcoming Capacity")
+    
+    n <- if (on_pipeline) nrow(filtered_pipeline()) else nrow(filtered())
+    
+    noun <- if (on_pipeline) {
+      c("upcoming entry", "upcoming entries")
+    } else {
+      c("site", "sites")
+    }
+    
+    shown_term <- gsub('"', "", term, fixed = TRUE)
+    
+    if (n == 0) {
+      div(
+        class = "sb-search-status is-empty",
+        icon("circle-exclamation"),
+        span("No ", noun[2], " match ", tags$b(shown_term),
+             ". Try fewer words or reset the other filters.")
+      )
+    } else {
+      div(
+        class = "sb-search-status",
+        span(class = "sb-dot"),
+        span(tags$b(fmt(n)), " ", if (n == 1) noun[1] else noun[2],
+             " match ", tags$b(shown_term))
+      )
+    }
+  })
+  
   # Removable filter chips
   output$filter_chips <- renderUI({
     make <- function(type, vals) {
@@ -1849,6 +2281,7 @@ server <- function(input, output, session) {
     }
     
     highlight_on(FALSE)
+    updateTextInput(session, "global_search", value = "")
     
     gmax <- suppressWarnings(max(raw_data()$Capacity_MW_est, na.rm = TRUE))
     if (!is.finite(gmax)) gmax <- 100
@@ -1884,6 +2317,10 @@ server <- function(input, output, session) {
       df <- df %>% filter(Operator %in% input$operator_filter)
     }
     
+    # Free-text search
+    df <- apply_search(df, c("Operator", "City_clean", "State", "Country",
+                             "Region", "Cooling", "Notes", "Contacts"))
+    
     df %>%
       filter(
         is.na(Capacity_MW_est) |
@@ -1899,6 +2336,7 @@ server <- function(input, output, session) {
   # - US-only scope does NOT remove Indonesia
   # - State / country / city / operator filters do NOT affect it
   # It has its own country, quarter, and MW filters.
+  # The search bar applies to both tabs.
   # ----------------------------------------------------------
   
   filtered_pipeline <- reactive({
@@ -1926,6 +2364,10 @@ server <- function(input, output, session) {
             MW_available <= input$pipeline_mw_filter[2]
         )
     }
+    
+    # Free-text search
+    df <- apply_search(df, c("Operator", "City_clean", "State", "Country",
+                             "Region", "Quarter"))
     
     df %>%
       arrange(Quarter_Date, Operator, Country, State, City_clean)
@@ -2072,6 +2514,27 @@ server <- function(input, output, session) {
   
   observeEvent(input$map_reset, reset_map_view())
   observeEvent(input$pipeline_map_reset, reset_pipeline_view())
+  
+  # Searching zooms the Data Centers map to the matching sites;
+  # clearing the search puts the view back.
+  observeEvent(search_raw_d(), {
+    req(identical(input$main_tabs, "Data Centers"))
+    
+    if (!nzchar(search_raw_d())) {
+      reset_map_view()
+      return()
+    }
+    
+    pts <- filtered() %>%
+      filter(!is.na(Latitude), !is.na(Longitude))
+    
+    if (nrow(pts) == 0) {
+      return()
+    }
+    
+    leafletProxy("map") %>%
+      fit_points(pts$Latitude, pts$Longitude)
+  }, ignoreInit = TRUE)
   
   ##############################
   # DATA CENTERS MAP MARKERS
@@ -2239,6 +2702,7 @@ server <- function(input, output, session) {
   output$pipeline_map <- renderLeaflet({
     # Rendered from the SAME reactive dataset as the Upcoming Capacity table.
     df <- filtered_pipeline()
+    searching <- nzchar(search_raw_d())
     
     base_map <- leaflet(options = leafletOptions(
       worldCopyJump = FALSE,
@@ -2337,7 +2801,7 @@ server <- function(input, output, session) {
       "</div>"
     )
     
-    base_map %>%
+    m <- base_map %>%
       addCircleMarkers(
         lng = map_df$map_lng,
         lat = map_df$map_lat,
@@ -2357,6 +2821,13 @@ server <- function(input, output, session) {
         opacity = 0.9,
         labFormat = labelFormat(suffix = " MW")
       )
+    
+    # While searching, zoom to the matching entries
+    if (searching) {
+      m <- fit_points(m, map_df$map_lat, map_df$map_lng)
+    }
+    
+    m
   })
   
   # ==========================================================
@@ -2378,9 +2849,18 @@ server <- function(input, output, session) {
       arrange(Operator, Country, State, City)
   })
   
+  # dom = "lrtip" drops the table's own search box, since the
+  # sidebar search bar now filters the map, cards, and table together.
   output$table <- renderDT({
     table_data()
-  }, options = list(pageLength = 15), rownames = FALSE)
+  }, options = list(
+    pageLength = 15,
+    dom = "lrtip",
+    language = list(
+      emptyTable = "No sites match the current search and filters.",
+      zeroRecords = "No sites match the current search and filters."
+    )
+  ), rownames = FALSE)
   
   output$download_filtered <- downloadHandler(
     filename = function() {
@@ -2410,7 +2890,7 @@ server <- function(input, output, session) {
             yaxis = list(visible = FALSE),
             annotations = list(
               list(
-                text = "No upcoming capacity matches the current filters.",
+                text = "No upcoming capacity matches the current search and filters.",
                 x = 0.5,
                 y = 0.5,
                 xref = "paper",
@@ -2569,7 +3049,7 @@ server <- function(input, output, session) {
     
     if (nrow(df) == 0) {
       return(datatable(
-        tibble(Message = "No upcoming capacity matches the current filters."),
+        tibble(Message = "No upcoming capacity matches the current search and filters."),
         rownames = FALSE,
         options = list(dom = "t")
       ))
@@ -2580,6 +3060,7 @@ server <- function(input, output, session) {
       rownames = FALSE,
       options = list(
         pageLength = 25,
+        dom = "lrtip",
         scrollX = TRUE,
         autoWidth = TRUE,
         order = list(list(7, "asc")),
