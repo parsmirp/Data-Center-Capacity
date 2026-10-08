@@ -861,13 +861,13 @@ $(function() {
     }, 200);
   });
 
-  // Highlight button: outline <-> filled
-  Shiny.addCustomMessageHandler('hl_state', function(on) {
+    // Highlight button: off <-> on
+   Shiny.addCustomMessageHandler('hl_state', function(on) {
     $('#highlight_toggle')
-      .toggleClass('btn-warning', on)
-      .toggleClass('btn-outline-warning', !on)
-      .find('.hl-label')
-      .text(on ? 'Highlighting coming soon' : 'Highlight coming soon');
+      .toggleClass('is-on', on)
+      .attr('aria-pressed', on ? 'true' : 'false')
+      .find('.hl-sub')
+      .text(on ? 'Showing on map' : 'Click to highlight on map');
   });
 
   // ==========================================================
@@ -1442,6 +1442,75 @@ table.dataTable tbody tr:hover td { background-color: #17212F !important; }
   .kpi-value { font-size: 24px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ---------- Fancy "Coming soon" toggle ---------- */
+.btn.hl-btn {
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 14px; text-align: left;
+  border-radius: 14px; border: 1px solid #3A2F14;
+  background: linear-gradient(135deg, #1A1508, #0F1620 70%);
+  color: var(--ink);
+  transition: transform .15s ease, box-shadow .25s ease, border-color .25s ease, background .25s ease;
+}
+.btn.hl-btn:hover {
+  transform: translateY(-1px); border-color: var(--amber);
+  box-shadow: 0 6px 18px rgba(245,158,11,.18);
+}
+.btn.hl-btn:active { transform: translateY(0) scale(.99); }
+
+.hl-icon {
+  flex: none; width: 36px; height: 36px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--amber); background: rgba(245,158,11,.14); font-size: 15px;
+  transition: all .25s ease;
+}
+.hl-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
+.hl-title { font-weight: 700; font-size: 13.5px; color: #F8FAFC; }
+.hl-sub   { font-size: 11.5px; color: var(--ink-3); transition: color .25s ease; }
+
+.hl-count {
+  margin-left: auto; min-width: 26px; padding: 2px 8px; text-align: center;
+  border-radius: 999px; font-size: 12px; font-weight: 700;
+  color: #FCD34D; background: rgba(245,158,11,.14);
+  border: 1px solid rgba(245,158,11,.35); font-variant-numeric: tabular-nums;
+}
+
+/* ON state */
+.btn.hl-btn.is-on {
+  border-color: var(--amber);
+  background: linear-gradient(135deg, #3A2606, #1F1608 70%);
+  box-shadow: 0 0 0 1px rgba(245,158,11,.5), 0 0 22px rgba(245,158,11,.28);
+  animation: hlGlow 2.4s ease-in-out infinite;
+}
+.btn.hl-btn.is-on::after {          /* light sweep */
+  content: ""; position: absolute; top: 0; bottom: 0; left: -60%; width: 40%;
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,.14), transparent);
+  transform: skewX(-20deg); animation: hlSweep 3s ease-in-out infinite;
+  pointer-events: none;
+}
+.is-on .hl-icon { background: var(--amber); color: #1A1204; animation: hlPulse 1.6s ease-out infinite; }
+.is-on .hl-sub  { color: #FCD34D; }
+
+@keyframes hlPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(245,158,11,.55); }
+  100% { box-shadow: 0 0 0 12px rgba(245,158,11,0); }
+}
+@keyframes hlGlow {
+  0%,100% { box-shadow: 0 0 0 1px rgba(245,158,11,.5), 0 0 16px rgba(245,158,11,.22); }
+  50%     { box-shadow: 0 0 0 1px rgba(245,158,11,.7), 0 0 28px rgba(245,158,11,.40); }
+}
+@keyframes hlSweep {
+  0%   { left: -60%; }
+  60%,100% { left: 130%; }
+}
+.hl-count::before { content: ""; }
+.is-on .hl-count {
+  background: var(--amber); color: #1A1204; border-color: var(--amber);
+}
+.is-on .hl-title::after {
+  content: " \2713"; color: #FCD34D;
+}
 )---"
 
 # ============================================================
@@ -1565,8 +1634,14 @@ ui <- page_sidebar(
       
       actionButton(
         "highlight_toggle",
-        span(class = "hl-label", "Highlight coming soon"),
-        class = "btn-outline-warning w-100 mt-3",
+        label = tagList(
+          span(class = "hl-icon", icon("bolt")),
+          span(class = "hl-text",
+               span(class = "hl-title", textOutput("hl_count", inline = TRUE)),
+               span(class = "hl-sub", "Click to highlight on map"))
+        ),
+        class = "hl-btn w-100 mt-3",
+        `aria-pressed` = "false",
         title = "Highlight sites with capacity arriving in the next 4 quarters"
       )
     ),
@@ -2256,6 +2331,16 @@ server <- function(input, output, session) {
       mutate(key = paste(Operator, City_clean, State, Country, sep = "|")) %>%
       pull(key) %>%
       unique()
+  })
+  
+  # Count of sites in view that are coming online in the next 4 quarters
+  output$hl_count <- renderText({
+    keys <- upcoming_soon_keys()
+    n <- filtered() %>%
+      mutate(key = paste(Operator, City_clean, State, Country, sep = "|")) %>%
+      filter(key %in% keys) %>%
+      nrow()
+    paste0(fmt(n), if (n == 1) " site" else " sites", " coming soon")
   })
   
   # ==========================================================
