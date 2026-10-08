@@ -939,13 +939,18 @@ $(function() {
   }
 
   function choose(i) {
-    var s = shown[i];
-    if (!s) return;
-    var v = /\s/.test(s.t) ? '"' + s.t + '"' : s.t;
-    $inp().val(v).trigger('input');
-    hideSuggest();
-    $inp().focus();
-  }
+  var s = shown[i];
+  if (!s) return;
+
+  Shiny.setInputValue('search_selection', {
+    value: s.t,
+    type: s.k
+  }, {priority: 'event'});
+
+  $inp().val(s.t);
+  hideSuggest();
+  $inp().focus();
+}
 
   Shiny.addCustomMessageHandler('search_suggest', function(m) {
     var l = [].concat(m.labels || []);
@@ -1939,6 +1944,51 @@ server <- function(input, output, session) {
       list(labels = unname(sug$label), types = unname(sug$type))
     )
   }, ignoreNULL = FALSE)
+  
+  observeEvent(input$search_selection, {
+    s <- input$search_selection
+    req(s$value, s$type)
+    
+    value <- s$value
+    type  <- s$type
+    
+    if (identical(type, "State")) {
+      updateSelectizeInput(
+        session,
+        "state_filter",
+        selected = value
+      )
+      
+    } else if (identical(type, "Country")) {
+      updateSelectizeInput(
+        session,
+        "country_filter",
+        selected = value
+      )
+      
+    } else if (identical(type, "City")) {
+      updateSelectizeInput(
+        session,
+        "city_filter",
+        selected = value
+      )
+      
+    } else if (identical(type, "Operator")) {
+      updateSelectizeInput(
+        session,
+        "operator_filter",
+        selected = value
+      )
+      
+    }
+    
+    # Clear the free-text search after selecting a structured suggestion.
+    updateTextInput(
+      session,
+      "global_search",
+      value = ""
+    )
+  })
   
   # ----------------------------------------------------------
   # Location filter
