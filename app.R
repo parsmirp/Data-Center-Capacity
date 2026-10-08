@@ -1,22 +1,18 @@
 # ============================================================
 # Data Center Capacity Dashboard
-# MASTER DATA:
-# DC.xlsx (THANOS EXCEL SHEET)
-
-
-# RUNTIME DATA:
-# dc_data.sqlite
-
+#
+# MASTER DATA:   DC.xlsx
+# RUNTIME DATA:  dc_data.sqlite
+#
 # Workflow:
 # 1. Edit & save DC.xlsx
 # 2. Launch the app - it imports DC.xlsx automatically at startup
 #    (only if the file changed since the last import)
-# 3. (Optional) Use "Refresh from DC.xlsx" in Version History if
-#    you edit DC.xlsx while the app is already running
-
-# SQLite remains the fast runtime database.
-# Geocoding happens during import (startup or manual refresh),
-# reusing cached coordinates for cities already geocoded.
+# 3. (Optional) "Refresh from DC.xlsx" in Version History if you
+#    edit DC.xlsx while the app is already running
+#
+# SQLite is the fast runtime database. Geocoding happens during
+# import and reuses cached coordinates.
 # ============================================================
 
 # ---------- Packages ----------
@@ -34,15 +30,19 @@ library(readxl)
 library(tidyr)
 library(jsonlite)
 
-# ---------- File locations ----------
+# ---------- File locations & settings ----------
 
 DB_PATH <- "dc_data.sqlite"
 MASTER_FILE <- "DC.xlsx"
 
+# Optional: link to the master workbook on SharePoint (shown in the header).
+# Leave as "" to hide the link.
+SHAREPOINT_URL <- ""
+
 ## carto map api key
 CARTO_KEY <- Sys.getenv("CARTO_API_KEY")
 if (!nzchar(CARTO_KEY) && file.exists("carto_key.txt")) {
-  CARTO_KEY <- trimws(readLines("carto_key.txt", n=1, warn = FALSE))
+  CARTO_KEY <- trimws(readLines("carto_key.txt", n = 1, warn = FALSE))
 }
 CARTO_POSITRON_URL <- paste0(
   "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
@@ -52,12 +52,9 @@ CARTO_ATTRIBUTION <- paste0(
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ',
   'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
 )
-##
 
+# Password required for "Refresh from DC.xlsx" and "Restore version".
 REFRESH_PASSWORD <- Sys.getenv("DC_REFRESH_PASSWORD", unset = "bytebt")
-# Password required to click "Refresh from DC.xlsx".
-# Reads the DC_REFRESH_PASSWORD environment variable if set,
-# otherwise falls back to the value below.
 
 # ---------- Quarter columns ----------
 
@@ -71,25 +68,13 @@ QUARTER_COLS <- c(
 # ---------- Optional master-file columns ----------
 
 MASTER_OPTIONAL_COLS <- c(
-  "Address",
-  "City",
-  "State/Province",
-  "Region",
-  "Capacity Upload date",
+  "Market", "Address", "City", "State/Province", "Region", "Capacity Upload date",
   QUARTER_COLS,
-  "Utility Rate ($/kWh)",
-  "Price ($/kW)",
-  "Cooling",
-  "PUE",
-  "Tax Incentives",
-  "Deal Reg",
-  "Notes",
-  "Contacts"
+  "Utility Rate ($/kWh)", "Price ($/kW)", "Cooling", "PUE",
+  "Tax Incentives", "Deal Reg", "Notes", "Contacts"
 )
 
-# ---------- Country centroids ----------
-# Used only when a row has no city.
-# These are approximate map locations, not exact site locations.
+# ---------- Country centroids (used only when a row has no city) ----------
 
 country_centroids <- tribble(
   ~Country,               ~Latitude, ~Longitude,
@@ -138,40 +123,23 @@ MANUAL_COORDS <- tribble(
 # ============================================================
 # PARSING HELPERS
 # ============================================================
-# Examples:
-# "20-40 MW"    -> 30
-# "3 MW + 6 MW" -> 9
-# "18 MW"       -> 18
-# "5-10 MW ramp"-> 7.5
-# NA / blank    -> NA
+# "20-40 MW" -> 30 | "3 MW + 6 MW" -> 9 | "18 MW" -> 18 | blank -> NA
 
 parse_capacity_mw <- function(x) {
   x <- as.character(x)
-  
-  # Remove thousands-separator commas (e.g. "3,300" -> "3300")
-  # before any number extraction happens below.
   x <- str_replace_all(x, ",", "")
   
   vapply(x, function(val) {
-    if (is.na(val)) {
-      return(NA_real_)
-    }
+    if (is.na(val)) return(NA_real_)
     
     parts <- str_split(val, "\\+")[[1]]
     part_vals <- vapply(parts, function(p) {
       nums <- str_extract_all(p, "[0-9]+\\.?[0-9]*")[[1]]
-      
-      if (length(nums) == 0) {
-        return(NA_real_)
-      }
-      
+      if (length(nums) == 0) return(NA_real_)
       mean(as.numeric(nums))
     }, numeric(1))
     
-    if (all(is.na(part_vals))) {
-      return(NA_real_)
-    }
-    
+    if (all(is.na(part_vals))) return(NA_real_)
     sum(part_vals, na.rm = TRUE)
   }, numeric(1), USE.NAMES = FALSE)
 }
@@ -179,10 +147,8 @@ parse_capacity_mw <- function(x) {
 # "Q2 2027" -> 2027-04-01
 quarter_to_date <- function(q) {
   m <- str_match(q, "^Q([1-4])\\s+(\\d{4})$")
-  
   qn <- as.integer(m[, 2])
   yr <- as.integer(m[, 3])
-  
   month <- (qn - 1L) * 3L + 1L
   
   as.Date(ifelse(
@@ -194,22 +160,17 @@ quarter_to_date <- function(q) {
 
 # ============================================================
 # SEARCH HELPERS
+#   equinix texas     -> every word must match somewhere in the row
+#   "digital realty"  -> exact phrase
 # ============================================================
-# Search syntax:
-#   equinix texas      -> every word must match somewhere in the row
-#   "digital realty"   -> exact phrase (quotes)
-# Each field is matched separately, so words never "stitch" across
-# two different columns.
 
 parse_search_terms <- function(term) {
   term <- str_to_lower(term)
   
-  # Quoted phrases (an unfinished quote is treated as a phrase too)
   m <- str_match_all(term, '"([^"]*)"?')[[1]]
   phrases <- if (nrow(m) > 0) trimws(m[, 2]) else character(0)
   phrases <- phrases[nzchar(phrases)]
   
-  # Everything outside quotes is split into single words
   rest <- trimws(str_replace_all(term, '"[^"]*"?', " "))
   words <- if (nzchar(rest)) str_split(rest, "\\s+")[[1]] else character(0)
   words <- words[nzchar(words)]
@@ -223,9 +184,7 @@ fit_points <- function(map, lat, lng) {
   lat <- lat[ok]
   lng <- lng[ok]
   
-  if (length(lat) == 0) {
-    return(map)
-  }
+  if (length(lat) == 0) return(map)
   
   if (min(lat) == max(lat) && min(lng) == max(lng)) {
     map %>% setView(lng = lng[1], lat = lat[1], zoom = 9)
@@ -246,84 +205,50 @@ initialize_database <- function() {
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  # Create metadata table if necessary.
   if (!"dc_meta" %in% dbListTables(con)) {
     dbWriteTable(
-      con,
-      "dc_meta",
+      con, "dc_meta",
       tibble(
-        version = integer(),
-        timestamp = character(),
-        note = character(),
-        n_rows = integer(),
-        n_pipeline_rows = integer()
+        version = integer(), timestamp = character(), note = character(),
+        n_rows = integer(), n_pipeline_rows = integer()
       ),
       overwrite = TRUE
     )
   }
   
-  # Create an empty current table if necessary.
   if (!"dc_current" %in% dbListTables(con)) {
     dbWriteTable(
-      con,
-      "dc_current",
+      con, "dc_current",
       tibble(
-        Operator = character(),
-        City = character(),
-        State = character(),
-        Country = character(),
-        Region = character(),
-        Capacity = character(),
-        Capacity_MW_est = double(),
-        Utility_Rate = character(),
-        Price_per_kW = character(),
-        Cooling = character(),
-        PUE = double(),
-        Tax_Incentives = character(),
-        Deal_Reg = character(),
-        Notes = character(),
-        Contacts = character(),
-        is_us = logical(),
-        City_clean = character(),
-        Latitude = double(),
-        Longitude = double()
+        Operator = character(), City = character(), State = character(),
+        Country = character(), Region = character(), Capacity = character(),
+        Capacity_MW_est = double(), Utility_Rate = character(),
+        Price_per_kW = character(), Cooling = character(), PUE = double(),
+        Tax_Incentives = character(), Deal_Reg = character(),
+        Notes = character(), Contacts = character(), is_us = logical(),
+        City_clean = character(), Latitude = double(), Longitude = double()
       ),
       overwrite = TRUE
     )
   }
   
-  # Create empty pipeline table.
   if (!"dc_pipeline_current" %in% dbListTables(con)) {
     dbWriteTable(
-      con,
-      "dc_pipeline_current",
+      con, "dc_pipeline_current",
       tibble(
-        Operator = character(),
-        City_clean = character(),
-        State = character(),
-        Country = character(),
-        Region = character(),
-        is_us = logical(),
-        Quarter = character(),
-        Quarter_Date = character(),
-        MW_available = double(),
-        Latitude = double(),
-        Longitude = double()
+        Operator = character(), City_clean = character(), State = character(),
+        Country = character(), Region = character(), is_us = logical(),
+        Quarter = character(), Quarter_Date = character(),
+        MW_available = double(), Latitude = double(), Longitude = double()
       ),
       overwrite = TRUE
     )
   }
   
-  # Geocode cache.
   if (!"geocode_cache" %in% dbListTables(con)) {
     dbWriteTable(
-      con,
-      "geocode_cache",
-      tibble(
-        key = character(),
-        Latitude = double(),
-        Longitude = double()
-      ),
+      con, "geocode_cache",
+      tibble(key = character(), Latitude = double(), Longitude = double()),
       overwrite = TRUE
     )
   }
@@ -339,7 +264,6 @@ clean_master_df <- function(raw) {
   names(raw) <- str_trim(names(raw))
   
   required_cols <- c("DC Operator", "Country", "Total Capacity (MW)")
-  
   missing_req <- setdiff(required_cols, names(raw))
   
   if (length(missing_req) > 0) {
@@ -349,22 +273,22 @@ clean_master_df <- function(raw) {
     ))
   }
   
-  # Add optional columns if missing.
   for (col in MASTER_OPTIONAL_COLS) {
-    if (!col %in% names(raw)) {
-      raw[[col]] <- NA_character_
-    }
+    if (!col %in% names(raw)) raw[[col]] <- NA_character_
   }
   
-  # Trim text and turn blank strings into NA.
   raw <- raw %>%
-    mutate(across(everything(), ~ na_if(str_trim(as.character(.x)), "")))
+    mutate(across(everything(), ~ na_if(str_trim(as.character(.x)), ""))) %>%
+    mutate(row_id = row_number())
   
-  # ---------- Current sites ----------
+  # Market = what users see/filter by. City = real city, used only for geocoding.
   current <- raw %>%
     transmute(
+      row_id,
       Operator = `DC Operator`,
+      Market = Market,
       City = City,
+      Geo_City = coalesce(City, Market),
       Address = Address,
       State = `State/Province`,
       Country = Country,
@@ -380,25 +304,23 @@ clean_master_df <- function(raw) {
       Notes = Notes,
       Contacts = Contacts,
       is_us = Country == "United States",
-      City_clean = if_else(!is.na(City), City, paste0(Country, " (no city provided)"))
+      City_clean = coalesce(Market, City, paste0(Country, " (no city provided)"))
     )
   
-  # ---------- Pipeline metadata ----------
   pipeline_meta <- raw %>%
     transmute(
+      row_id,
       Operator = `DC Operator`,
       City = City,
       State = `State/Province`,
       Country = Country,
       Region = Region,
       is_us = Country == "United States",
-      City_clean = if_else(!is.na(City), City, paste0(Country, " (no city provided)"))
+      City_clean = coalesce(Market, City, paste0(Country, " (no city provided)"))
     )
   
-  pipeline_quarters <- raw %>%
-    select(all_of(QUARTER_COLS))
+  pipeline_quarters <- raw %>% select(all_of(QUARTER_COLS))
   
-  # ---------- Convert quarter columns into rows ----------
   pipeline <- bind_cols(pipeline_meta, pipeline_quarters) %>%
     pivot_longer(
       cols = all_of(QUARTER_COLS),
@@ -412,7 +334,7 @@ clean_master_df <- function(raw) {
     ) %>%
     filter(!is.na(MW_available)) %>%
     select(
-      Operator, City_clean, State, Country, Region,
+      row_id, Operator, City_clean, State, Country, Region,
       is_us, Quarter, Quarter_Date, MW_available
     )
   
@@ -428,44 +350,44 @@ load_geocode_cache <- function() {
   on.exit(dbDisconnect(con), add = TRUE)
   
   if (!"geocode_cache" %in% dbListTables(con)) {
-    return(tibble(
-      key = character(),
-      Latitude = double(),
-      Longitude = double()
-    ))
+    return(tibble(key = character(), Latitude = double(), Longitude = double()))
   }
   
-  dbReadTable(con, "geocode_cache") %>%
-    as_tibble()
+  dbReadTable(con, "geocode_cache") %>% as_tibble()
 }
 
 save_geocode_cache <- function(cache_df) {
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
-  
   dbWriteTable(con, "geocode_cache", cache_df, overwrite = TRUE)
 }
 
-# Geocode during import (startup or manual refresh).
-# Existing cached cities are instantaneous.
-# New cities use OSM if tidygeocoder is installed.
+# Real city used for geocoding (falls back to Market, then to old City_clean data)
+geo_city <- function(df) {
+  gc   <- if ("Geo_City" %in% names(df)) df$Geo_City else rep(NA_character_, nrow(df))
+  city <- if ("City" %in% names(df)) df$City else rep(NA_character_, nrow(df))
+  coalesce(gc, city)
+}
 
 # Address rows get their own cache key; all others stay city-level.
 geo_key <- function(df) {
   addr <- if ("Address" %in% names(df)) df$Address else rep(NA_character_, nrow(df))
+  gc <- geo_city(df)
   ifelse(
     !is.na(addr),
-    paste("ADDR", addr, df$City_clean, df$State, df$Country, sep = "|"),
-    paste(df$City_clean, df$State, df$Country, sep = "|")
+    paste("ADDR", addr, gc, df$State, df$Country, sep = "|"),
+    paste(gc, df$State, df$Country, sep = "|")
   )
 }
 
 geocode_current <- function(current_df, existing_current = NULL, progress_fn = NULL) {
   if (!"Address" %in% names(current_df)) current_df$Address <- NA_character_
+  current_df$Geo_City <- geo_city(current_df)
   cache <- load_geocode_cache()
   
   if (!is.null(existing_current) &&
-      all(c("City_clean", "State", "Country", "Latitude", "Longitude") %in% names(existing_current))) {
+      all(c("State", "Country", "Latitude", "Longitude") %in% names(existing_current)) &&
+      any(c("Geo_City", "City") %in% names(existing_current))) {
     existing_coords <- existing_current %>%
       filter(!is.na(Latitude), !is.na(Longitude)) %>%
       mutate(key = geo_key(.), Latitude = as.numeric(Latitude), Longitude = as.numeric(Longitude)) %>%
@@ -478,7 +400,7 @@ geocode_current <- function(current_df, existing_current = NULL, progress_fn = N
   cache <- bind_rows(MANUAL_COORDS, cache) %>% distinct(key, .keep_all = TRUE)
   
   to_geocode <- current_df %>%
-    filter(!is.na(City)) %>%
+    filter(!is.na(Geo_City)) %>%
     mutate(key = geo_key(.)) %>%
     distinct(key, .keep_all = TRUE) %>%
     filter(!key %in% cache$key)
@@ -487,7 +409,7 @@ geocode_current <- function(current_df, existing_current = NULL, progress_fn = N
   if (nrow(to_geocode) > 0 && requireNamespace("tidygeocoder", quietly = TRUE)) {
     for (i in seq_len(nrow(to_geocode))) {
       r <- to_geocode[i, ]
-      addr <- paste(na.omit(c(r$Address, r$City_clean, r$State, r$Country)), collapse = ", ")
+      addr <- paste(na.omit(c(r$Address, r$Geo_City, r$State, r$Country)), collapse = ", ")
       if (!is.null(progress_fn)) progress_fn(i, nrow(to_geocode), addr)
       
       res <- tryCatch(tidygeocoder::geo(address = addr, method = "osm", quiet = TRUE),
@@ -507,7 +429,7 @@ geocode_current <- function(current_df, existing_current = NULL, progress_fn = N
   }
   
   current_df %>%
-    mutate(key = geo_key(.), city_key = paste(City_clean, State, Country, sep = "|")) %>%
+    mutate(key = geo_key(.), city_key = paste(Geo_City, State, Country, sep = "|")) %>%
     left_join(cache %>% select(key, Latitude, Longitude), by = "key") %>%
     left_join(cache %>% select(city_key = key, City_Lat = Latitude, City_Lon = Longitude),
               by = "city_key") %>%
@@ -517,12 +439,12 @@ geocode_current <- function(current_df, existing_current = NULL, progress_fn = N
       Latitude = case_when(
         !is.na(Latitude) ~ Latitude,
         !is.na(City_Lat) ~ City_Lat,
-        is.na(City) & !is.na(Country_Lat) ~ Country_Lat,
+        is.na(Geo_City) & !is.na(Country_Lat) ~ Country_Lat,
         TRUE ~ NA_real_),
       Longitude = case_when(
         !is.na(Longitude) ~ Longitude,
         !is.na(City_Lon) ~ City_Lon,
-        is.na(City) & !is.na(Country_Lon) ~ Country_Lon,
+        is.na(Geo_City) & !is.na(Country_Lon) ~ Country_Lon,
         TRUE ~ NA_real_)
     ) %>%
     select(-key, -city_key, -City_Lat, -City_Lon, -Country_Lat, -Country_Lon)
@@ -539,13 +461,8 @@ attach_pipeline_coordinates <- function(pipeline_df, current_df) {
     return(pipeline_df)
   }
   
-  if (!"Latitude" %in% names(pipeline_df)) {
-    pipeline_df$Latitude <- NA_real_
-  }
-  
-  if (!"Longitude" %in% names(pipeline_df)) {
-    pipeline_df$Longitude <- NA_real_
-  }
+  if (!"Latitude" %in% names(pipeline_df)) pipeline_df$Latitude <- NA_real_
+  if (!"Longitude" %in% names(pipeline_df)) pipeline_df$Longitude <- NA_real_
   
   coords <- current_df %>%
     select(City_clean, State, Country, Latitude, Longitude) %>%
@@ -562,28 +479,15 @@ attach_pipeline_coordinates <- function(pipeline_df, current_df) {
     ) %>%
     mutate(
       Latitude = coalesce(
-        Latitude,
-        Current_Latitude,
-        if_else(
-          str_ends(City_clean, fixed(" (no city provided)")),
-          Country_Latitude,
-          NA_real_
-        )
+        Latitude, Current_Latitude,
+        if_else(str_ends(City_clean, fixed(" (no city provided)")), Country_Latitude, NA_real_)
       ),
       Longitude = coalesce(
-        Longitude,
-        Current_Longitude,
-        if_else(
-          str_ends(City_clean, fixed(" (no city provided)")),
-          Country_Longitude,
-          NA_real_
-        )
+        Longitude, Current_Longitude,
+        if_else(str_ends(City_clean, fixed(" (no city provided)")), Country_Longitude, NA_real_)
       )
     ) %>%
-    select(
-      -Current_Latitude, -Current_Longitude,
-      -Country_Latitude, -Country_Longitude
-    )
+    select(-Current_Latitude, -Current_Longitude, -Country_Latitude, -Country_Longitude)
 }
 
 # ============================================================
@@ -594,42 +498,23 @@ load_current <- function() {
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  df <- dbReadTable(con, "dc_current") %>%
-    as_tibble()
+  df <- dbReadTable(con, "dc_current") %>% as_tibble()
   
-  if ("is_us" %in% names(df)) {
-    df$is_us <- as.logical(df$is_us)
-  } else {
-    df$is_us <- FALSE
-  }
+  if ("is_us" %in% names(df)) df$is_us <- as.logical(df$is_us) else df$is_us <- FALSE
   
-  # Make sure expected columns exist.
   defaults <- list(
-    Operator = NA_character_,
-    Address = NA_character_,
-    City = NA_character_,
-    State = NA_character_,
-    Country = NA_character_,
-    Region = NA_character_,
-    Capacity = NA_character_,
-    Capacity_MW_est = NA_real_,
-    Utility_Rate = NA_character_,
-    Price_per_kW = NA_character_,
-    Cooling = NA_character_,
-    PUE = NA_real_,
-    Tax_Incentives = NA_character_,
-    Deal_Reg = NA_character_,
-    Notes = NA_character_,
-    Contacts = NA_character_,
-    City_clean = NA_character_,
-    Latitude = NA_real_,
-    Longitude = NA_real_
+    Operator = NA_character_, Market = NA_character_, Address = NA_character_,
+    City = NA_character_, Geo_City = NA_character_,
+    State = NA_character_, Country = NA_character_, Region = NA_character_,
+    Capacity = NA_character_, Capacity_MW_est = NA_real_,
+    Utility_Rate = NA_character_, Price_per_kW = NA_character_,
+    Cooling = NA_character_, PUE = NA_real_, Tax_Incentives = NA_character_,
+    Deal_Reg = NA_character_, Notes = NA_character_, Contacts = NA_character_,
+    City_clean = NA_character_, Latitude = NA_real_, Longitude = NA_real_
   )
   
   for (col in names(defaults)) {
-    if (!col %in% names(df)) {
-      df[[col]] <- defaults[[col]]
-    }
+    if (!col %in% names(df)) df[[col]] <- defaults[[col]]
   }
   
   df
@@ -640,30 +525,17 @@ load_current_pipeline <- function() {
   on.exit(dbDisconnect(con), add = TRUE)
   
   if (!"dc_pipeline_current" %in% dbListTables(con)) {
-    return(
-      tibble(
-        Operator = character(),
-        City_clean = character(),
-        State = character(),
-        Country = character(),
-        Region = character(),
-        is_us = logical(),
-        Quarter = character(),
-        Quarter_Date = as.Date(character()),
-        MW_available = double(),
-        Latitude = double(),
-        Longitude = double()
-      )
-    )
+    return(tibble(
+      Operator = character(), City_clean = character(), State = character(),
+      Country = character(), Region = character(), is_us = logical(),
+      Quarter = character(), Quarter_Date = as.Date(character()),
+      MW_available = double(), Latitude = double(), Longitude = double()
+    ))
   }
   
-  df <- dbReadTable(con, "dc_pipeline_current") %>%
-    as_tibble()
+  df <- dbReadTable(con, "dc_pipeline_current") %>% as_tibble()
   
-  if ("Quarter_Date" %in% names(df)) {
-    df$Quarter_Date <- as.Date(df$Quarter_Date)
-  }
-  
+  if ("Quarter_Date" %in% names(df)) df$Quarter_Date <- as.Date(df$Quarter_Date)
   df$is_us <- as.logical(df$is_us)
   
   df
@@ -673,17 +545,13 @@ list_versions <- function() {
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  if (!"dc_meta" %in% dbListTables(con)) {
-    return(tibble())
-  }
+  if (!"dc_meta" %in% dbListTables(con)) return(tibble())
   
-  dbReadTable(con, "dc_meta") %>%
-    arrange(desc(version)) %>%
-    as_tibble()
+  dbReadTable(con, "dc_meta") %>% arrange(desc(version)) %>% as_tibble()
 }
 
 # ============================================================
-# SAVE VERSION
+# SAVE / RESTORE VERSION
 # ============================================================
 
 MAX_VERSIONS <- 15L
@@ -704,29 +572,16 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  # Current metadata.
   meta <- if ("dc_meta" %in% dbListTables(con)) {
-    dbReadTable(con, "dc_meta") %>%
-      as_tibble()
+    dbReadTable(con, "dc_meta") %>% as_tibble()
   } else {
-    tibble(
-      version = integer(),
-      timestamp = character(),
-      note = character(),
-      n_rows = integer(),
-      n_pipeline_rows = integer()
-    )
+    tibble(version = integer(), timestamp = character(), note = character(),
+           n_rows = integer(), n_pipeline_rows = integer())
   }
   
-  if (!"n_pipeline_rows" %in% names(meta)) {
-    meta$n_pipeline_rows <- NA_integer_
-  }
+  if (!"n_pipeline_rows" %in% names(meta)) meta$n_pipeline_rows <- NA_integer_
   
-  next_v <- if (nrow(meta) == 0) {
-    1L
-  } else {
-    max(meta$version) + 1L
-  }
+  next_v <- if (nrow(meta) == 0) 1L else max(meta$version) + 1L
   
   # Snapshot whatever is currently live.
   if ("dc_current" %in% dbListTables(con)) {
@@ -755,11 +610,9 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
     next_v <- next_v + 1L
   }
   
-  # Write new live data.
   dbWriteTable(con, "dc_current", new_current, overwrite = TRUE)
   dbWriteTable(con, "dc_pipeline_current", new_pipeline, overwrite = TRUE)
   
-  # Save the new version.
   dbWriteTable(con, paste0("dc_history_v", next_v), new_current, overwrite = TRUE)
   dbWriteTable(con, paste0("dc_pipeline_history_v", next_v), new_pipeline, overwrite = TRUE)
   
@@ -779,10 +632,6 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
   dbExecute(con, "VACUUM")
 }
 
-# ============================================================
-# RESTORE VERSION
-# ============================================================
-
 restore_version <- function(v) {
   con <- get_con()
   
@@ -794,14 +643,9 @@ restore_version <- function(v) {
   }
   
   old_current <- dbReadTable(con, tbl_name)
-  
   pipe_tbl <- paste0("dc_pipeline_history_v", v)
   
-  old_pipeline <- if (pipe_tbl %in% dbListTables(con)) {
-    dbReadTable(con, pipe_tbl)
-  } else {
-    tibble()
-  }
+  old_pipeline <- if (pipe_tbl %in% dbListTables(con)) dbReadTable(con, pipe_tbl) else tibble()
   
   dbDisconnect(con)
   
@@ -812,7 +656,6 @@ restore_version <- function(v) {
 
 # ============================================================
 # IMPORT CHANGE DETECTION
-# Skips the startup import when DC.xlsx hasn't changed
 # ============================================================
 
 file_signature <- function() {
@@ -823,12 +666,9 @@ get_stored_signature <- function() {
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  if (!"import_state" %in% dbListTables(con)) {
-    return(NA_character_)
-  }
+  if (!"import_state" %in% dbListTables(con)) return(NA_character_)
   
   df <- dbReadTable(con, "import_state")
-  
   if (nrow(df) == 0) NA_character_ else df$signature[1]
 }
 
@@ -837,8 +677,7 @@ set_stored_signature <- function(sig) {
   on.exit(dbDisconnect(con), add = TRUE)
   
   dbWriteTable(
-    con,
-    "import_state",
+    con, "import_state",
     tibble(signature = sig, imported_at = as.character(Sys.time())),
     overwrite = TRUE
   )
@@ -856,60 +695,29 @@ import_master_excel <- function(progress_fn = NULL) {
     ))
   }
   
-  # Hash the file before reading it, so an edit made mid-import
-  # isn't mistaken for "already imported".
+  # Hash before reading so a mid-import edit isn't mistaken for "already imported".
   import_sig <- file_signature()
   
-  # Read Excel.
   raw <- readxl::read_excel(MASTER_FILE, col_types = "text")
   names(raw) <- str_trim(names(raw))
   
-  # Clean into current + pipeline.
   parsed <- clean_master_df(raw)
   
-  # Existing data.
   existing_current <- tryCatch(load_current(), error = function(e) NULL)
   
-  # Geocode / preserve coordinates.
   parsed$current <- geocode_current(
     parsed$current,
     existing_current = existing_current,
     progress_fn = progress_fn
   )
   
-  # Geocode the unique locations represented in the upcoming-capacity
-  # pipeline as well. This means a pipeline-only location can still
-  # appear on the map even if it is not yet a current site.
-  pipeline_locations <- parsed$pipeline %>%
-    distinct(City_clean, State, Country) %>%
-    mutate(
-      City = if_else(
-        str_ends(City_clean, fixed(" (no city provided)")),
-        NA_character_,
-        City_clean
-      ),
-      Operator = NA_character_,
-      Region = NA_character_,
-      is_us = Country == "United States"
-    )
-  
-  if (nrow(pipeline_locations) > 0) {
-    pipeline_locations <- geocode_current(
-      pipeline_locations,
-      existing_current = parsed$current,
-      progress_fn = progress_fn
-    )
-  }
-  
+  # Each upcoming-capacity entry inherits the coordinates of its own sheet row
   parsed$pipeline <- parsed$pipeline %>%
-    left_join(
-      pipeline_locations %>%
-        select(City_clean, State, Country, Latitude, Longitude) %>%
-        distinct(City_clean, State, Country, .keep_all = TRUE),
-      by = c("City_clean", "State", "Country")
-    )
+    left_join(parsed$current %>% select(row_id, Latitude, Longitude), by = "row_id") %>%
+    select(-row_id)
   
-  # Save to SQLite.
+  parsed$current <- parsed$current %>% select(-row_id)
+  
   save_new_version(parsed$current, parsed$pipeline, note = "Refresh from DC.xlsx")
   set_stored_signature(import_sig)
   
@@ -917,13 +725,7 @@ import_master_excel <- function(progress_fn = NULL) {
 }
 
 # ============================================================
-# STARTUP IMPORT FROM DC.XLSX
-#
-# Runs once when the app process starts, but only if DC.xlsx
-# changed since the last import. import_master_excel() calls
-# save_new_version(), which snapshots the previous state first,
-# so even a startup import is reversible from the Version
-# History tab.
+# STARTUP IMPORT (only if DC.xlsx changed since the last import)
 # ============================================================
 
 if (!file.exists(MASTER_FILE)) {
@@ -950,18 +752,99 @@ if (!file.exists(MASTER_FILE)) {
   })
   
   if (!is.null(startup_import_result)) {
-    cat(
-      sprintf(
-        "Startup import complete: %d sites, %d upcoming-capacity entries.\n",
-        nrow(startup_import_result$current),
-        nrow(startup_import_result$pipeline)
-      )
-    )
+    cat(sprintf(
+      "Startup import complete: %d sites, %d upcoming-capacity entries.\n",
+      nrow(startup_import_result$current),
+      nrow(startup_import_result$pipeline)
+    ))
   }
 }
 
 # ============================================================
-# JS + small UI helpers
+# UI HELPERS
+# ============================================================
+
+# Range slider with two editable number boxes (kept in sync by the server)
+range_slider <- function(id, min = 0, max = 100, value = c(0, 100), step = 1) {
+  div(
+    class = "range-wrap",
+    div(
+      class = "range-inputs",
+      numericInput(paste0(id, "_lo"), NULL, value = value[1], min = min, step = step),
+      span(class = "range-dash", "\u2013"),
+      numericInput(paste0(id, "_hi"), NULL, value = value[2], min = min, step = step)
+    ),
+    sliderInput(id, NULL, min = min, max = max, value = value, step = step)
+  )
+}
+
+# Headline number tile
+kpi <- function(tone, ic, label, out_id) {
+  div(
+    class = paste("kpi", paste0("kpi-", tone)),
+    div(class = "kpi-icon", icon(ic)),
+    div(
+      class = "kpi-text",
+      div(class = "kpi-label", label),
+      div(class = "kpi-value", textOutput(out_id, inline = TRUE))
+    )
+  )
+}
+
+# Card header with an icon and an optional hint
+card_title <- function(ic, title, hint = NULL) {
+  card_header(
+    class = "dc-card-head",
+    span(class = "dc-card-ic", icon(ic)),
+    span(class = "dc-card-title", title),
+    if (!is.null(hint)) span(class = "dc-card-hint", hint)
+  )
+}
+
+# Shared look for plotly charts on the dark theme
+dark_plot <- function(p, ...) {
+  p %>%
+    layout(
+      paper_bgcolor = "rgba(0,0,0,0)",
+      plot_bgcolor = "rgba(0,0,0,0)",
+      font = list(color = "#E2E8F0", family = "Inter"),
+      hoverlabel = list(bgcolor = "#0B1220", bordercolor = "#334155",
+                        font = list(color = "#F1F5F9", family = "Inter")),
+      ...
+    ) %>%
+    config(displayModeBar = FALSE, responsive = TRUE)
+}
+
+empty_plot <- function(msg) {
+  plot_ly() %>%
+    dark_plot(
+      xaxis = list(visible = FALSE),
+      yaxis = list(visible = FALSE),
+      annotations = list(list(
+        text = msg, x = 0.5, y = 0.5, xref = "paper", yref = "paper",
+        showarrow = FALSE, font = list(size = 14, color = "#94A3B8")
+      ))
+    )
+}
+
+# Adds an in-cell bar to a numeric column (skipped if the column has no data)
+add_color_bar <- function(dt, df, col, color = "#2563EB") {
+  v <- suppressWarnings(as.numeric(df[[col]]))
+  rng <- suppressWarnings(range(v, na.rm = TRUE))
+  if (length(v) == 0 || !all(is.finite(rng))) return(dt)
+  if (rng[1] == rng[2]) rng[2] <- rng[1] + 1
+  
+  dt %>% formatStyle(
+    col,
+    background = styleColorBar(rng, color),
+    backgroundSize = "96% 62%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "center"
+  )
+}
+
+# ============================================================
+# JAVASCRIPT
 # ============================================================
 
 APP_JS <- r"---(
@@ -978,7 +861,7 @@ $(function() {
     }, 200);
   });
 
-  // Highlight button: switch between outline and filled style
+  // Highlight button: outline <-> filled
   Shiny.addCustomMessageHandler('hl_state', function(on) {
     $('#highlight_toggle')
       .toggleClass('btn-warning', on)
@@ -988,15 +871,11 @@ $(function() {
   });
 
   // ==========================================================
-  // SEARCH BAR
-  //  - autocomplete suggestions (operators, cities, states, countries)
-  //  - arrow keys + Enter to pick, Esc to close / clear / leave
-  //  - "/" or Ctrl/Cmd+K focuses the box from anywhere
-  //  - clear button appears while there is text
+  // SEARCH BAR: suggestions, arrow keys, "/" or Ctrl/Cmd+K, clear
   // ==========================================================
-  var SUG = [];        // [{t: 'Equinix', k: 'Operator'}, ...]
-  var shown = [];      // suggestions currently displayed
-  var active = -1;     // keyboard-highlighted suggestion
+  var SUG = [];
+  var shown = [];
+  var active = -1;
 
   function $inp() { return $('#global_search'); }
   function $box() { return $('#sb_suggest'); }
@@ -1062,21 +941,18 @@ $(function() {
   function choose(i) {
     var s = shown[i];
     if (!s) return;
-    // Multi-word picks become an exact phrase so "New York" stays together
     var v = /\s/.test(s.t) ? '"' + s.t + '"' : s.t;
     $inp().val(v).trigger('input');
     hideSuggest();
     $inp().focus();
   }
 
-  // Suggestion list pushed from the server
   Shiny.addCustomMessageHandler('search_suggest', function(m) {
     var l = [].concat(m.labels || []);
     var k = [].concat(m.types || []);
     SUG = l.map(function(x, i) { return { t: String(x), k: k[i] }; });
   });
 
-  // One-time input attributes (no browser autofill, screen-reader roles)
   $inp().attr({
     autocomplete: 'off',
     spellcheck: 'false',
@@ -1096,7 +972,6 @@ $(function() {
     setTimeout(hideSuggest, 120);
   });
 
-  // Keeps the clear button right after programmatic changes (Reset button)
   $(document).on('shiny:inputchanged', function(e) {
     if (e.name === 'global_search') {
       $('.sb-search').toggleClass('has-text', !!e.value && String(e.value).length > 0);
@@ -1141,7 +1016,6 @@ $(function() {
     $inp().focus();
   });
 
-  // "/" or Ctrl/Cmd+K jumps to the search box
   $(document).on('keydown', function(e) {
     var t = e.target || {};
     var tag = (t.tagName || '').toLowerCase();
@@ -1155,14 +1029,29 @@ $(function() {
       }
     }
   });
+
+  // ==========================================================
+  // TABLE NOTES: the (i) button only tells the server which row
+  // was clicked. The server answers with a modal, so nothing is
+  // shown until the button is pressed.
+  // ==========================================================
+  $(document).on('click', 'button.note-btn', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var b = this;
+    Shiny.setInputValue('note_click', {
+      title: b.getAttribute('data-title') || '',
+      sub:   b.getAttribute('data-sub') || '',
+      note:  b.getAttribute('data-note') || ''
+    }, { priority: 'event' });
+  });
 });
 )---"
 
-# Custom cluster-bubble icon for the Data Centers map.
-# Bubble color:
-#   orange  -> any site inside is highlighted (coming online soon)
-#   heat    -> color of the largest current site inside
-#   gray    -> everything inside has no current capacity
+# Cluster bubble icon for the Data Centers map.
+#   orange -> any site inside is highlighted (coming online soon)
+#   heat   -> colour of the largest current site inside
+#   gray   -> everything inside has no current capacity
 CLUSTER_ICON_JS <- r"---(
 function(cluster) {
   var kids = cluster.getAllChildMarkers();
@@ -1194,40 +1083,395 @@ function(cluster) {
 }
 )---"
 
-# A range slider with two editable number boxes on top.
-# Drag the slider OR type exact values in the boxes; they stay in sync
-# (see sync_range() in the server).
-range_slider <- function(id, min = 0, max = 100, value = c(0, 100), step = 1) {
-  div(
-    class = "range-wrap",
-    div(
-      class = "range-inputs",
-      numericInput(paste0(id, "_lo"), NULL, value = value[1], min = min, step = step),
-      span(class = "range-dash", "\u2013"),
-      numericInput(paste0(id, "_hi"), NULL, value = value[2], min = min, step = step)
-    ),
-    sliderInput(id, NULL, min = min, max = max, value = value, step = step)
-  )
+# ============================================================
+# CSS
+# Plain CSS in its own <style> tag (not run through Sass), so a
+# rule can never be silently dropped by the theme compiler.
+# ============================================================
+
+APP_CSS <- r"---(
+:root {
+  --bg: #080C12;
+  --panel: #0F1620;
+  --panel-2: #131C28;
+  --line: #1E2A3A;
+  --line-2: #2A3A50;
+  --ink: #E6EDF6;
+  --ink-2: #A3B2C6;
+  --ink-3: #6B7C93;
+  --blue: #3B82F6;
+  --blue-2: #60A5FA;
+  --amber: #F59E0B;
+  --green: #22C55E;
 }
+
+html, body, .bslib-page-sidebar, .bslib-sidebar-layout,
+.bslib-sidebar-layout > .main, .tab-content, .container-fluid {
+  background-color: var(--bg) !important;
+  color: var(--ink) !important;
+}
+
+body {
+  background-image:
+    radial-gradient(1100px 500px at 85% -10%, rgba(59,130,246,.10), transparent 60%),
+    radial-gradient(800px 400px at -10% 110%, rgba(59,130,246,.06), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* ---------- Header ---------- */
+.bslib-page-sidebar > header, .bslib-page-title {
+  background: transparent !important;
+}
+.app-title {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+}
+.app-title img { height: 44px; border-radius: 8px; }
+.app-title-text { line-height: 1.15; }
+.app-title-name { font-size: 20px; font-weight: 700; letter-spacing: -.01em; color: #F8FAFC; }
+.app-title-sub  { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
+.app-title-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border-radius: 999px;
+  border: 1px solid var(--line-2); background: rgba(15,22,32,.8);
+  font-size: 12px; color: var(--ink-2); text-decoration: none;
+}
+.pill .live-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--green);
+  box-shadow: 0 0 0 3px rgba(34,197,94,.18);
+}
+a.pill:hover { border-color: var(--blue); color: #fff; }
+
+/* ---------- Tabs ---------- */
+.nav-tabs { border-bottom: 1px solid var(--line) !important; margin-bottom: 18px; gap: 4px; }
+.nav-tabs .nav-link {
+  color: var(--ink-3) !important; border: 0 !important; background: transparent !important;
+  padding: 10px 16px; font-weight: 600; font-size: 14px;
+  border-bottom: 2px solid transparent !important;
+}
+.nav-tabs .nav-link:hover { color: var(--ink) !important; }
+.nav-tabs .nav-link.active {
+  color: #fff !important; border-bottom-color: var(--blue) !important;
+}
+
+/* ---------- Cards ---------- */
+.card, .card-body {
+  background-color: var(--panel) !important;
+  color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+.card {
+  border-radius: 14px !important;
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 12px 28px rgba(0,0,0,.28);
+  margin-bottom: 16px;
+}
+.card-header, .card-footer {
+  background-color: var(--panel) !important;
+  color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+.dc-card-head { display: flex; align-items: center; gap: 10px; padding: 12px 18px !important; }
+.dc-card-ic {
+  width: 28px; height: 28px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(59,130,246,.14); color: var(--blue-2); font-size: 13px;
+}
+.dc-card-title { font-weight: 650; font-size: 14.5px; color: #F1F5F9; }
+.dc-card-hint { margin-left: auto; font-size: 12px; color: var(--ink-3); }
+
+/* ---------- KPI tiles ---------- */
+.kpi {
+  display: flex; align-items: center; gap: 16px;
+  padding: 18px 20px; border-radius: 14px;
+  background: var(--panel); border: 1px solid var(--line);
+  position: relative; overflow: hidden;
+}
+.kpi::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--accent, var(--blue));
+}
+.kpi-icon {
+  flex: none; width: 46px; height: 46px; border-radius: 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 19px; color: var(--accent, var(--blue));
+  background: color-mix(in srgb, var(--accent, #3B82F6) 14%, transparent);
+}
+.kpi-label { font-size: 13px; color: var(--ink-2); }
+.kpi-value {
+  font-size: 30px; font-weight: 750; letter-spacing: -.02em;
+  color: #F8FAFC; line-height: 1.15; font-variant-numeric: tabular-nums;
+}
+.kpi-yellow { --accent: #FACC15; }
+.kpi-blue   { --accent: #3B82F6; }
+.kpi-teal   { --accent: #2DD4BF; }
+.kpi-amber  { --accent: #F59E0B; }
+
+/* ---------- Sidebar ---------- */
+.bslib-sidebar-layout > .sidebar {
+  background-color: #0B1119 !important;
+  color: var(--ink) !important;
+  border-right: 1px solid var(--line) !important;
+}
+.sb-summary {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 12px; padding: 10px 14px; margin-bottom: 12px;
+}
+.sb-summary-main { font-size: 13px; color: var(--ink-2); }
+.sb-summary-main b { font-size: 22px; color: var(--blue-2); }
+
+.form-control, .selectize-input {
+  background-color: #080C12 !important; color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+.selectize-dropdown {
+  background-color: var(--panel) !important; color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+.form-control:focus, .selectize-input.focus {
+  box-shadow: 0 0 0 .2rem rgba(59,130,246,.25) !important;
+  border-color: var(--blue) !important;
+}
+
+/* Search bar */
+.sb-search { position: relative; margin-bottom: 12px; }
+.sb-search .form-group, .sb-search .shiny-input-container { margin: 0 !important; width: 100% !important; }
+.sb-search input#global_search {
+  height: 42px; padding: 0 44px 0 40px; border-radius: 999px !important;
+  background-color: #080C12 !important; border: 1px solid var(--line-2) !important;
+  color: var(--ink) !important; font-size: 13.5px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.sb-search input#global_search::placeholder { color: var(--ink-3); }
+.sb-search input#global_search:focus {
+  border-color: var(--blue) !important;
+  box-shadow: 0 0 0 .22rem rgba(59,130,246,.22) !important; outline: none;
+}
+.sb-search-icon {
+  position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
+  color: var(--ink-3); font-size: 13px; pointer-events: none; z-index: 3;
+}
+.sb-search:focus-within .sb-search-icon { color: var(--blue-2); }
+.sb-search-kbd {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  min-width: 22px; height: 22px; padding: 0 6px; line-height: 20px; text-align: center;
+  border: 1px solid #334155; border-bottom-width: 2px; border-radius: 6px;
+  background: var(--panel); color: var(--ink-2);
+  font-family: inherit; font-size: 11px; font-weight: 600;
+  pointer-events: none; z-index: 3;
+}
+.sb-search:focus-within .sb-search-kbd, .sb-search.has-text .sb-search-kbd { display: none; }
+@media (hover: none) { .sb-search-kbd { display: none; } }
+.sb-search-clear {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; padding: 0; border: 0; line-height: 21px; text-align: center;
+  border-radius: 50%; background: #1E293B; color: var(--ink-2);
+  font-size: 15px; font-weight: 700; display: none; z-index: 3; cursor: pointer;
+}
+.sb-search-clear:hover { background: #334155; color: #F87171; }
+.sb-search.has-text .sb-search-clear { display: block; }
+.sb-suggest {
+  display: none; position: absolute; left: 0; right: 0; top: calc(100% + 6px);
+  z-index: 1050; max-height: 320px; overflow-y: auto; padding: 5px;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px;
+  box-shadow: 0 14px 32px rgba(0,0,0,.55);
+}
+.sb-suggest.open { display: block; }
+.sb-sug-item {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 7px 10px; border-radius: 8px;
+  font-size: 13px; color: #CBD5E1; cursor: pointer;
+}
+.sb-sug-item.active { background: rgba(59,130,246,.18); color: #F1F5F9; }
+.sb-sug-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-sug-text mark { background: transparent; color: var(--blue-2); font-weight: 700; padding: 0; }
+.sb-sug-type {
+  flex: none; padding: 1px 8px; font-size: 11px; color: var(--ink-3);
+  border: 1px solid var(--line); border-radius: 999px;
+}
+.sb-sug-item.active .sb-sug-type { border-color: var(--blue); color: #93C5FD; }
+
+.sb-search-status {
+  display: flex; align-items: flex-start; gap: 8px; margin: -4px 4px 12px;
+  font-size: 12px; line-height: 1.4; color: var(--ink-2);
+}
+.sb-search-status b { color: var(--ink); font-weight: 600; }
+.sb-search-status .sb-dot {
+  flex: none; width: 7px; height: 7px; margin-top: 5px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,.6);
+}
+.sb-search-status.is-empty { color: #FBBF24; }
+.sb-search-status.is-empty b { color: #FDE68A; }
+
+.sb-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.sb-presets .btn { flex: 1; }
+.sb-chips { margin-bottom: 8px; }
+.sb-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #1E293B; border: 1px solid #334155; border-radius: 999px;
+  padding: 2px 10px; font-size: 12px; margin: 0 6px 6px 0;
+}
+.sb-chip-x { color: var(--ink-2); text-decoration: none; font-weight: 700; }
+.sb-chip-x:hover { color: #F87171; }
+.sb-footer { font-size: 11px; color: var(--ink-3); text-align: center; margin-top: 10px; }
+
+.accordion {
+  --bs-accordion-bg: transparent;
+  --bs-accordion-border-color: var(--line);
+  --bs-accordion-btn-color: var(--ink);
+  --bs-accordion-btn-bg: var(--panel);
+  --bs-accordion-active-bg: #0B1220;
+  --bs-accordion-active-color: #93C5FD;
+  --bs-accordion-btn-focus-box-shadow: 0 0 0 .2rem rgba(59,130,246,.25);
+}
+.accordion-button { font-size: 13px; font-weight: 600; }
+.accordion-button::after { filter: invert(1); }
+
+.seg-toggle .shiny-options-group {
+  display: flex; background: #080C12; border: 1px solid var(--line);
+  border-radius: 8px; padding: 3px;
+}
+.seg-toggle .form-check { flex: 1; margin: 0; padding: 0; }
+.seg-toggle .form-check-input { position: absolute; opacity: 0; }
+.seg-toggle .form-check-label {
+  display: block; text-align: center; padding: 6px 0; border-radius: 6px;
+  cursor: pointer; color: var(--ink-2); font-size: 13px; transition: all .15s;
+}
+.seg-toggle .form-check-input:checked + .form-check-label { background: var(--blue); color: #fff; }
+
+.sb-section-label { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 14px 0 6px; }
+.sb-section-label:first-child { margin-top: 2px; }
+
+.range-wrap .irs-from, .range-wrap .irs-to, .range-wrap .irs-single { display: none !important; }
+.range-inputs { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.range-inputs .form-group, .range-inputs .shiny-input-container {
+  margin: 0 !important; flex: 1; width: auto !important;
+}
+.range-inputs input { text-align: center; font-weight: 600; color: var(--blue-2) !important; }
+.range-dash { color: var(--ink-3); }
+
+/* ---------- Data tables ---------- */
+.dataTables_wrapper { background-color: var(--panel) !important; color: var(--ink) !important; }
+table.dataTable, table.dataTable td, table.dataTable th {
+  background-color: var(--panel) !important; color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+table.dataTable thead th {
+  color: var(--ink-2) !important; font-weight: 600; font-size: 12.5px;
+  border-bottom: 1px solid var(--line-2) !important;
+}
+table.dataTable { width: 100% !important; }
+.dataTables_wrapper { width: 100%; }
+table.dataTable tbody td { font-size: 13px; vertical-align: middle; }
+table.dataTable tbody tr:hover td { background-color: #17212F !important; }
+.dataTables_wrapper .dataTables_length, .dataTables_wrapper .dataTables_filter,
+.dataTables_wrapper .dataTables_info, .dataTables_wrapper .dataTables_paginate { color: var(--ink-2) !important; }
+.dataTables_wrapper .form-control, .dataTables_wrapper select {
+  background-color: #080C12 !important; color: var(--ink) !important; border-color: var(--line) !important;
+}
+.page-link { background: var(--panel) !important; color: var(--ink-2) !important; border-color: var(--line) !important; }
+.page-item.active .page-link { background: var(--blue) !important; color: #fff !important; border-color: var(--blue) !important; }
+
+/* ---------- Notes: table button ---------- */
+.note-btn {
+  width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  border: 1px solid #334155; background: #0B1220; color: #93C5FD;
+  font: italic 700 13px/24px Georgia, serif; cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.note-btn:hover, .note-btn:focus-visible {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+  box-shadow: 0 0 0 .22rem rgba(59,130,246,.25); outline: none;
+}
+.note-none { color: #334155; }
+
+/* ---------- Notes: modal (opened from the table) ---------- */
+.modal-content {
+  background: var(--panel) !important; color: var(--ink) !important;
+  border: 1px solid var(--line-2) !important; border-radius: 16px !important;
+  box-shadow: 0 24px 60px rgba(0,0,0,.65);
+}
+.modal-header, .modal-footer { border-color: var(--line) !important; }
+.modal-header { background: linear-gradient(135deg, rgba(59,130,246,.18), rgba(59,130,246,0)); }
+.note-modal-op { font-size: 17px; font-weight: 700; color: #F8FAFC; }
+.note-modal-sub { font-size: 13px; color: var(--ink-2); margin-top: 2px; }
+.note-modal-body { font-size: 14px; line-height: 1.65; color: #D5DEEA; white-space: pre-wrap; max-height: 55vh; overflow-y: auto; }
+.modal-backdrop.show { opacity: .65; }
+
+/* ---------- Notes: map popup (native <details>, closed by default) ---------- */
+.map-note { margin-top: 8px; }
+.map-note > summary {
+  list-style: none; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px 3px 4px; border: 1px solid #BFDBFE; border-radius: 999px;
+  background: #EFF6FF; color: #1D4ED8; font-size: 12px; font-weight: 600;
+}
+.map-note > summary::-webkit-details-marker { display: none; }
+.map-note > summary::marker { content: ""; }
+.map-note > summary:hover { background: #DBEAFE; }
+.map-note-i {
+  width: 18px; height: 18px; border-radius: 50%; background: #3B82F6; color: #fff;
+  font: italic 700 11px/18px Georgia, serif; text-align: center;
+}
+.map-note-body {
+  margin-top: 8px; padding: 8px 10px; background: #F8FAFC;
+  border-left: 3px solid #3B82F6; border-radius: 6px;
+  font-size: 12px; line-height: 1.5; color: #374151;
+  max-height: 160px; overflow-y: auto; white-space: pre-wrap;
+}
+
+/* ---------- Map ---------- */
+.leaflet-container { background-color: var(--bg) !important; border-radius: 0 0 14px 14px; }
+.dc-legend {
+  background: rgba(255,255,255,.95); color: #1F2937; padding: 8px 12px;
+  border-radius: 8px; box-shadow: 0 1px 5px rgba(0,0,0,.35);
+  font-size: 12px; line-height: 1.3; min-width: 150px;
+}
+.dc-legend-title { font-weight: 700; margin-bottom: 5px; }
+.dc-legend-bar { height: 10px; border-radius: 5px; background: linear-gradient(to right, #DBEAFE, #60A5FA, #1D4ED8, #0A1A4A); }
+.dc-legend-scale { display: flex; justify-content: space-between; font-size: 11px; color: #4B5563; margin-top: 2px; }
+.dc-legend-row { display: flex; align-items: center; gap: 7px; margin-top: 6px; }
+.dc-legend-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; flex: none; }
+
+/* ---------- Misc ---------- */
+.btn-outline-primary { --bs-btn-color: #93C5FD; --bs-btn-border-color: #2B4A7A; --bs-btn-hover-bg: var(--blue); --bs-btn-hover-border-color: var(--blue); }
+.version-note { color: var(--ink-2); font-size: 13.5px; max-width: 70ch; }
+:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 2px; }
+@media (max-width: 768px) {
+  .app-title-sub { display: none; }
+  .kpi-value { font-size: 24px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+)---"
 
 # ============================================================
 # UI
 # ============================================================
 
 ui <- page_sidebar(
-  title = tags$span(
-    tags$img(
-      src = "logo.png",
-      height = "80px",
-      style = "margin-right:10px; vertical-align:middle;",
-      onerror = "this.style.display='none'"
+  title = div(
+    class = "app-title",
+    tags$img(src = "logo.png", alt = "",
+             onerror = "this.style.display='none'"),
+    div(
+      class = "app-title-text",
+      div(class = "app-title-name", "Data Center Capacity"),
+      div(class = "app-title-sub", "Current sites and upcoming capacity across operators")
+    ),
+    div(
+      class = "app-title-right",
+      if (nzchar(SHAREPOINT_URL)) {
+        tags$a(class = "pill", href = SHAREPOINT_URL, target = "_blank", rel = "noopener",
+               icon("file-excel"), "Master workbook")
+      },
+      uiOutput("hdr_fresh", inline = TRUE)
     )
   ),
   
   theme = bs_theme(
     version = 5,
-    bg = "#0B0F14",
-    fg = "#E2E8F0",
+    bg = "#080C12",
+    fg = "#E6EDF6",
     primary = "#3B82F6",
     secondary = "#64748B",
     success = "#22C55E",
@@ -1235,330 +1479,12 @@ ui <- page_sidebar(
     danger = "#EF4444",
     base_font = font_google("Inter", local = TRUE),
     heading_font = font_google("Inter", local = TRUE)
-  ) %>%
-    bs_add_rules(
-      "
-  html, body,
-  .bslib-page-sidebar,
-  .bslib-sidebar-layout,
-  .bslib-sidebar-layout > .main,
-  .tab-content,
-  .container-fluid {
-    background-color: #0B0F14 !important;
-    color: #E2E8F0 !important;
-  }
-
-  .card,
-  .card-header,
-  .card-body {
-    background-color: #111827 !important;
-    color: #E2E8F0 !important;
-    border-color: #1F2937 !important;
-  }
-  .card-footer {
-  background-color: #111827 !important;
-  color: #E2E8F0 !important;
-  border-color: #1F2937 !important;
-}
-
-  .bslib-value-box,
-  .bslib-value-box .value-box-area,
-  .bslib-value-box .value-box-showcase {
-    background-color: #111827 !important;
-    border-color: #1F2937 !important;
-    color: #E2E8F0 !important;
-  }
-
-  .bslib-sidebar-layout > .sidebar {
-    background-color: #111827 !important;
-    color: #E2E8F0 !important;
-  }
-
-  .leaflet-container {
-    background-color: #0B0F14 !important;
-  }
-
-  .dataTables_wrapper {
-    background-color: #111827 !important;
-    color: #E2E8F0 !important;
-  }
-
-  table.dataTable,
-  table.dataTable td,
-  table.dataTable th {
-    background-color: #111827 !important;
-    color: #E2E8F0 !important;
-    border-color: #1F2937 !important;
-  }
-
-  table.dataTable tbody tr:hover {
-    background-color: #1F2937 !important;
-  }
-
-  .dataTables_wrapper .dataTables_length,
-  .dataTables_wrapper .dataTables_filter,
-  .dataTables_wrapper .dataTables_info,
-  .dataTables_wrapper .dataTables_paginate {
-    color: #E2E8F0 !important;
-  }
-
-  .dataTables_wrapper .form-control {
-    background-color: #0B0F14 !important;
-    color: #E2E8F0 !important;
-    border-color: #1F2937 !important;
-  }
-
-  #pipeline_mw_filter {
-    background-color: #0B0F14 !important;
-    color: #E2E8F0 !important;
-    border-color: #1F2937 !important;
-  }
-
-  .form-control,
-  .selectize-input {
-    background-color: #0B0F14 !important;
-    color: #E2E8F0 !important;
-    border-color: #1F2937 !important;
-  }
-
-  .selectize-dropdown {
-    background-color: #111827 !important;
-    color: #E2E8F0 !important;
-    border-color: #1F2937 !important;
-  }
-
-  /* Make the lightning bolt icon yellow and glowing */
-  .bslib-value-box .value-box-showcase .fa-bolt,
-  .bslib-value-box .value-box-showcase .fas.fa-bolt {
-    color: #FDE047 !important;
-    text-shadow:
-      0 0 6px  rgba(250, 204, 21, 0.7),
-      0 0 12px rgba(234, 179, 8, 0.4);
-  }
-
-  /* Subtle theme-blue glow for Operators / Cities icons */
-  .bslib-value-box .value-box-showcase .glow-blue i,
-  .bslib-value-box .value-box-showcase .glow-blue svg {
-    color: #3B82F6 !important;
-    fill: #3B82F6 !important;
-    text-shadow: 0 0 6px rgba(59, 130, 246, 0.6);
-    filter: drop-shadow(0 0 3px rgba(59, 130, 246, 0.5));
-  }
-
-  /* ---------- Sidebar polish ---------- */
-  .sb-summary {
-    background: linear-gradient(135deg, rgba(59,130,246,.18), rgba(59,130,246,.04));
-    border: 1px solid #1F2937; border-radius: 10px;
-    padding: 10px 12px; margin-bottom: 12px;
-  }
-  .sb-summary-main { font-size: 13px; color: #CBD5E1; }
-  .sb-summary-main b { font-size: 22px; color: #60A5FA; }
-
-  /* ---------- Search bar ---------- */
-  .sb-search { position: relative; margin-bottom: 12px; }
-  .sb-search .form-group,
-  .sb-search .shiny-input-container {
-    margin: 0 !important; width: 100% !important;
-  }
-  .sb-search input#global_search {
-    height: 42px;
-    padding: 0 44px 0 40px;
-    border-radius: 999px !important;
-    background-color: #0B0F14 !important;
-    border: 1px solid #263244 !important;
-    color: #E2E8F0 !important;
-    font-size: 13.5px;
-    transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease;
-  }
-  .sb-search input#global_search::placeholder { color: #64748B; }
-  .sb-search input#global_search:hover { border-color: #3B4A60 !important; }
-  .sb-search input#global_search:focus {
-    border-color: #3B82F6 !important;
-    background-color: #0D131B !important;
-    box-shadow: 0 0 0 .22rem rgba(59,130,246,.22) !important;
-    outline: none;
-  }
-
-  .sb-search-icon {
-    position: absolute; left: 15px; top: 50%;
-    transform: translateY(-50%);
-    color: #64748B; font-size: 13px;
-    pointer-events: none; z-index: 3;
-    transition: color .15s ease;
-  }
-  .sb-search:focus-within .sb-search-icon { color: #60A5FA; }
-
-  .sb-search-kbd {
-    position: absolute; right: 12px; top: 50%;
-    transform: translateY(-50%);
-    min-width: 22px; height: 22px; padding: 0 6px;
-    line-height: 20px; text-align: center;
-    border: 1px solid #334155; border-bottom-width: 2px; border-radius: 6px;
-    background: #111827; color: #94A3B8;
-    font-family: inherit; font-size: 11px; font-weight: 600;
-    pointer-events: none; z-index: 3;
-  }
-  .sb-search:focus-within .sb-search-kbd,
-  .sb-search.has-text .sb-search-kbd { display: none; }
-  @media (hover: none) { .sb-search-kbd { display: none; } }
-
-  .sb-search-clear {
-    position: absolute; right: 10px; top: 50%;
-    transform: translateY(-50%);
-    width: 22px; height: 22px; padding: 0; border: 0;
-    line-height: 21px; text-align: center; border-radius: 50%;
-    background: #1E293B; color: #94A3B8;
-    font-size: 15px; font-weight: 700;
-    display: none; z-index: 3; cursor: pointer;
-    transition: background .15s ease, color .15s ease;
-  }
-  .sb-search-clear:hover { background: #334155; color: #F87171; }
-  .sb-search-clear:focus-visible { outline: 2px solid #3B82F6; outline-offset: 2px; }
-  .sb-search.has-text .sb-search-clear { display: block; }
-
-  .sb-suggest {
-    display: none;
-    position: absolute; left: 0; right: 0; top: calc(100% + 6px);
-    z-index: 1050;
-    max-height: 320px; overflow-y: auto;
-    padding: 5px;
-    background: #111827;
-    border: 1px solid #263244; border-radius: 12px;
-    box-shadow: 0 14px 32px rgba(0,0,0,.55);
-  }
-  .sb-suggest.open { display: block; }
-  .sb-sug-item {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 10px; padding: 7px 10px; border-radius: 8px;
-    font-size: 13px; color: #CBD5E1; cursor: pointer;
-  }
-  .sb-sug-item.active { background: rgba(59,130,246,.18); color: #F1F5F9; }
-  .sb-sug-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sb-sug-text mark {
-    background: transparent; color: #60A5FA; font-weight: 700; padding: 0;
-  }
-  .sb-sug-type {
-    flex: none; padding: 1px 8px;
-    font-size: 11px; color: #64748B;
-    border: 1px solid #1F2937; border-radius: 999px;
-  }
-  .sb-sug-item.active .sb-sug-type { border-color: #3B82F6; color: #93C5FD; }
-
-  .sb-search-status {
-    display: flex; align-items: flex-start; gap: 8px;
-    margin: -4px 4px 12px;
-    font-size: 12px; line-height: 1.4; color: #94A3B8;
-  }
-  .sb-search-status b { color: #E2E8F0; font-weight: 600; }
-  .sb-search-status .sb-dot {
-    flex: none; width: 7px; height: 7px; margin-top: 5px;
-    border-radius: 50%; background: #22C55E;
-    box-shadow: 0 0 6px rgba(34,197,94,.6);
-  }
-  .sb-search-status.is-empty { color: #FBBF24; }
-  .sb-search-status.is-empty .fa,
-  .sb-search-status.is-empty svg { flex: none; margin-top: 3px; }
-  .sb-search-status.is-empty b { color: #FDE68A; }
-
-  .sb-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
-
-  .sb-chips { margin-bottom: 8px; }
-  .sb-chip {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: #1E293B; border: 1px solid #334155; border-radius: 999px;
-    padding: 2px 10px; font-size: 12px; margin: 0 6px 6px 0;
-  }
-  .sb-chip-x { color: #94A3B8; text-decoration: none; font-weight: 700; }
-  .sb-chip-x:hover { color: #F87171; }
-
-  .sb-footer { font-size: 11px; color: #64748B; text-align: center; margin-top: 10px; }
-
-  /* Accordion */
-  .accordion {
-    --bs-accordion-bg: transparent;
-    --bs-accordion-border-color: #1F2937;
-    --bs-accordion-btn-color: #E2E8F0;
-    --bs-accordion-btn-bg: #111827;
-    --bs-accordion-active-bg: #0B1220;
-    --bs-accordion-active-color: #93C5FD;
-    --bs-accordion-btn-focus-box-shadow: 0 0 0 .2rem rgba(59,130,246,.25);
-  }
-  .accordion-button {
-    font-size: 12px; font-weight: 600;
-    letter-spacing: .06em; text-transform: uppercase;
-  }
-  .accordion-button::after { filter: invert(1); }
-
-  /* Focus glow */
-  .form-control:focus, .selectize-input.focus {
-    box-shadow: 0 0 0 .2rem rgba(59,130,246,.25) !important;
-    border-color: #3B82F6 !important;
-  }
-
-  /* Scope radio -> segmented toggle */
-  .seg-toggle .shiny-options-group {
-    display: flex; background: #0B0F14; border: 1px solid #1F2937;
-    border-radius: 8px; padding: 3px;
-  }
-  .seg-toggle .form-check { flex: 1; margin: 0; padding: 0; }
-  .seg-toggle .form-check-input { position: absolute; opacity: 0; }
-  .seg-toggle .form-check-label {
-    display: block; text-align: center; padding: 6px 0; border-radius: 6px;
-    cursor: pointer; color: #94A3B8; font-size: 13px; transition: all .15s;
-  }
-  .seg-toggle .form-check-input:checked + .form-check-label { background: #3B82F6; color: #fff; }
-
-  .sb-section-label {
-    font-size: 11px; font-weight: 600; letter-spacing: .08em;
-    text-transform: uppercase; color: #94A3B8; margin: 14px 0 6px;
-  }
-  .sb-section-label:first-child { margin-top: 2px; }
-  .sb-hint { font-size: 11px; color: #64748B; margin-top: -4px; }
-  .sb-presets .btn { flex: 1; }
-
-  /* Range slider with typed number boxes */
-  .range-wrap .irs-from, .range-wrap .irs-to, .range-wrap .irs-single {
-    display: none !important;
-  }
-  .range-inputs { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
-  .range-inputs .form-group,
-  .range-inputs .shiny-input-container {
-    margin: 0 !important; flex: 1; width: auto !important;
-  }
-  .range-inputs input {
-    text-align: center; font-weight: 600; color: #60A5FA !important;
-  }
-  .range-dash { color: #64748B; }
-
-  /* ---------- Data Centers map legend ---------- */
-  .dc-legend {
-    background: rgba(255,255,255,.94);
-    color: #1F2937;
-    padding: 8px 12px;
-    border-radius: 8px;
-    box-shadow: 0 1px 5px rgba(0,0,0,.35);
-    font-size: 12px;
-    line-height: 1.3;
-    min-width: 150px;
-  }
-  .dc-legend-title { font-weight: 700; margin-bottom: 5px; }
-  .dc-legend-bar {
-    height: 10px; border-radius: 5px;
-    background: linear-gradient(to right, #DBEAFE, #60A5FA, #1D4ED8, #0A1A4A);
-  }
-  .dc-legend-scale {
-    display: flex; justify-content: space-between;
-    font-size: 11px; color: #4B5563; margin-top: 2px;
-  }
-  .dc-legend-row {
-    display: flex; align-items: center; gap: 7px; margin-top: 6px;
-  }
-  .dc-legend-dot {
-    width: 11px; height: 11px; border-radius: 50%;
-    display: inline-block; flex: none;
-  }
-"
-    ),
+  ),
+  
+  tags$head(
+    tags$style(HTML(APP_CSS)),
+    tags$script(HTML(APP_JS))
+  ),
   
   # ==========================================================
   # SIDEBAR
@@ -1570,7 +1496,7 @@ ui <- page_sidebar(
     
     uiOutput("sb_summary"),
     
-    # ---------------- Search (Data Centers + Upcoming Capacity) ----------------
+    # ---------------- Search ----------------
     conditionalPanel(
       condition = "input.main_tabs != 'Version History'",
       
@@ -1632,7 +1558,7 @@ ui <- page_sidebar(
         ),
         
         accordion_panel(
-          "Capacity", value = "cap", icon = icon("bolt"),
+          "Capacity (MW)", value = "cap", icon = icon("bolt"),
           range_slider("capacity_filter", 0, 100, c(0, 100), step = 1)
         )
       ),
@@ -1697,50 +1623,43 @@ ui <- page_sidebar(
   # TABS
   # ==========================================================
   
-  tags$head(tags$script(HTML(APP_JS))),
-  
   navset_tab(
     id = "main_tabs",
     
     # --------------------------------------------------------
-    # MAP & TABLE
+    # DATA CENTERS
     # --------------------------------------------------------
-    
     nav_panel(
       "Data Centers",
       
       layout_columns(
         col_widths = c(4, 4, 4),
-        
-        value_box(
-          title = "Total capacity (MW est.)",
-          value = textOutput("vb_capacity"),
-          showcase = tags$span(icon("bolt"), style = "color: #FACC15;"),
-          theme = "success"
-        ),
-        
-        value_box(
-          title = "Operators in view",
-          value = textOutput("vb_operators"),
-          showcase = tags$span(icon("building"), class = "glow-blue"),
-          theme = "primary"
-        ),
-        
-        value_box(
-          title = "Cities in view",
-          value = textOutput("vb_cities"),
-          showcase = tags$span(icon("city"), class = "glow-blue"),
-          theme = "secondary"
-        )
+        kpi("yellow", "bolt", "Total capacity (MW est.)", "vb_capacity"),
+        kpi("blue", "building", "Operators in view", "vb_operators"),
+        kpi("teal", "city", "Cities in view", "vb_cities")
       ),
       
       card(
         full_screen = TRUE,
-        card_header("Map of Total Capacity"),
+        card_title("earth-americas", "Map of total capacity",
+                   "Bigger, darker dots = more MW. Click a dot for details."),
         leafletOutput("map", height = 520)
       ),
+      
+      layout_columns(
+        col_widths = c(7, 5),
+        card(
+          card_title("ranking-star", "Top operators", "By estimated MW in view"),
+          plotlyOutput("top_operators_chart", height = "330px")
+        ),
+        card(
+          card_title("globe", "Capacity by country", "Share of MW in view"),
+          plotlyOutput("country_share_chart", height = "330px")
+        )
+      ),
+      
       card(
-        card_header("Matching rows"),
+        card_title("table", "Matching rows", "Click the (i) button on a row to read its notes"),
         DTOutput("table"),
         card_footer(
           downloadButton(
@@ -1754,50 +1673,33 @@ ui <- page_sidebar(
     
     # --------------------------------------------------------
     # UPCOMING CAPACITY
-    # (filters now live in the sidebar)
     # --------------------------------------------------------
-    
     nav_panel(
       "Upcoming Capacity",
       
       layout_columns(
         col_widths = c(4, 4, 4),
-        
-        value_box(
-          title = "Total upcoming capacity (MW est.)",
-          value = textOutput("vb_pipeline_mw"),
-          showcase = icon("bolt"),
-          theme = "success"
-        ),
-        
-        value_box(
-          title = "Upcoming entries in view",
-          value = textOutput("vb_pipeline_entries"),
-          showcase = tags$span(icon("clock"), class = "glow-blue"),
-          theme = "warning"
-        ),
-        
-        value_box(
-          title = "Sites in view",
-          value = textOutput("vb_pipeline_sites"),
-          showcase = tags$span(icon("building"), class = "glow-blue"),
-          theme = "primary"
-        )
+        kpi("yellow", "bolt", "Upcoming capacity (MW est.)", "vb_pipeline_mw"),
+        kpi("amber", "clock", "Upcoming entries in view", "vb_pipeline_entries"),
+        kpi("blue", "building", "Sites in view", "vb_pipeline_sites")
       ),
       
       card(
         full_screen = TRUE,
-        card_header("Upcoming Capacity Map"),
+        card_title("map-location-dot", "Upcoming capacity map",
+                   "Each dot is one site and quarter"),
         leafletOutput("pipeline_map", height = 560)
       ),
       
       card(
-        card_header("Upcoming capacity by quarter"),
+        card_title("chart-column", "Upcoming capacity by quarter",
+                   "Hover a bar to see the operator breakdown"),
         plotlyOutput("pipeline_quarter_chart", height = "380px")
       ),
       
       card(
-        card_header("Capacity coming available - chronological order"),
+        card_title("calendar-days", "Capacity coming available",
+                   "In chronological order"),
         DTOutput("pipeline_table"),
         card_footer(
           downloadButton(
@@ -1812,37 +1714,30 @@ ui <- page_sidebar(
     # --------------------------------------------------------
     # VERSION HISTORY
     # --------------------------------------------------------
-    
     nav_panel(
       "Version History",
       
       card(
-        card_header("Refresh from DC.xlsx"),
-        
+        card_title("rotate", "Refresh from DC.xlsx"),
         p(
-          "DC.xlsx is the master file and is imported automatically ",
-          "every time the app starts. Use the button below only if ",
-          "you edit DC.xlsx while the app is already running and want ",
-          "to reload without restarting. ",
-          "The current database state is automatically preserved in version history."
+          class = "version-note",
+          "DC.xlsx is imported automatically every time the app starts. ",
+          "Use this button only if you edit DC.xlsx while the app is running. ",
+          "The current data is saved to version history first."
         ),
-        
-        actionButton("refresh_excel", "Refresh from DC.xlsx", icon = icon("rotate")),
-        
+        div(actionButton("refresh_excel", "Refresh from DC.xlsx",
+                         icon = icon("rotate"), class = "btn-primary")),
         br(),
-        br(),
-        
         uiOutput("refresh_status")
       ),
       
       card(
-        card_header("History"),
-        
+        card_title("clock-rotate-left", "History"),
         p(
-          "Select a version below to restore it. ",
-          "Restoring creates a new snapshot, so the action can be reversed."
+          class = "version-note",
+          "Select a version to restore it. Restoring saves a new snapshot, ",
+          "so you can always undo it."
         ),
-        
         DTOutput("version_table")
       )
     )
@@ -1852,6 +1747,7 @@ ui <- page_sidebar(
 # ============================================================
 # SERVER
 # ============================================================
+
 reset_view_button <- function(input_id) {
   easyButton(
     icon = "fa-globe",
@@ -1864,11 +1760,6 @@ reset_view_button <- function(input_id) {
 }
 
 server <- function(input, output, session) {
-  # ----------------------------------------------------------
-  # Load SQLite ONLY at session start.
-  # The startup import above has already run once for the whole
-  # app process, so this reads fresh data.
-  # ----------------------------------------------------------
   
   cur <- load_current()
   raw_data <- reactiveVal(cur)
@@ -1877,15 +1768,46 @@ server <- function(input, output, session) {
     attach_pipeline_coordinates(load_current_pipeline(), cur)
   )
   
-  # Current maximum of each range slider (used to clamp typed values)
   cap_slider_max <- reactiveVal(100)
   pipe_slider_max <- reactiveVal(100)
+  refresh_trigger <- reactiveVal(0)
+  
+  fmt <- function(x) format(round(x), big.mark = ",")
+  
+  # ----------------------------------------------------------
+  # Header: "last updated" pill
+  # ----------------------------------------------------------
+  
+  last_update <- reactive({
+    refresh_trigger()
+    v <- list_versions() %>% filter(!grepl("^Auto-snapshot", note))
+    if (nrow(v) == 0) NULL else v[1, ]
+  })
+  
+  output$hdr_fresh <- renderUI({
+    v <- last_update()
+    
+    if (is.null(v)) {
+      return(span(class = "pill", "No data loaded yet"))
+    }
+    
+    span(
+      class = "pill", title = "When the data was last imported",
+      span(class = "live-dot"),
+      paste0("Updated ", substr(v$timestamp, 1, 16), " (v", v$version, ")")
+    )
+  })
+  
+  output$data_freshness <- renderText({
+    v <- last_update()
+    if (is.null(v)) return("No data loaded yet")
+    paste0("Data refreshed ", substr(v$timestamp, 1, 16), " \u00b7 v", v$version)
+  })
   
   # ----------------------------------------------------------
   # Search
   # ----------------------------------------------------------
   
-  # Debounced so the map and tables don't rebuild on every keystroke
   search_raw_d <- debounce(
     reactive({
       s <- input$global_search
@@ -1894,19 +1816,13 @@ server <- function(input, output, session) {
     250
   )
   
-  # Keeps rows where EVERY search token appears in at least one of `cols`
   apply_search <- function(df, cols) {
     term <- search_raw_d()
     
-    if (!nzchar(term) || nrow(df) == 0) {
-      return(df)
-    }
+    if (!nzchar(term) || nrow(df) == 0) return(df)
     
     tokens <- parse_search_terms(term)
-    
-    if (length(tokens) == 0) {
-      return(df)
-    }
+    if (length(tokens) == 0) return(df)
     
     cols <- intersect(cols, names(df))
     
@@ -1920,7 +1836,7 @@ server <- function(input, output, session) {
     df[keep, ]
   }
   
-  # Autocomplete suggestions: operators, cities, states, countries
+  # Autocomplete suggestions
   observeEvent(list(raw_data(), raw_pipeline()), {
     cur_df <- raw_data()
     pl_df <- raw_pipeline()
@@ -1965,13 +1881,8 @@ server <- function(input, output, session) {
                length(input$country_filter) > 0) {
       keep <- rep(FALSE, nrow(df))
       
-      if (length(input$state_filter) > 0) {
-        keep <- keep | (df$State %in% input$state_filter)
-      }
-      
-      if (length(input$country_filter) > 0) {
-        keep <- keep | (df$Country %in% input$country_filter)
-      }
+      if (length(input$state_filter) > 0) keep <- keep | (df$State %in% input$state_filter)
+      if (length(input$country_filter) > 0) keep <- keep | (df$Country %in% input$country_filter)
       
       df <- df[keep, ]
     }
@@ -1980,7 +1891,7 @@ server <- function(input, output, session) {
   }
   
   # ----------------------------------------------------------
-  # Update state/country/capacity filters
+  # Filter choices
   # ----------------------------------------------------------
   
   observeEvent(list(raw_data(), input$scope), {
@@ -1998,17 +1909,10 @@ server <- function(input, output, session) {
       server = TRUE
     )
     
-    df_scoped <- if (input$scope == "us") {
-      df %>% filter(is_us)
-    } else {
-      df
-    }
+    df_scoped <- if (input$scope == "us") df %>% filter(is_us) else df
     
     max_cap <- suppressWarnings(max(df_scoped$Capacity_MW_est, na.rm = TRUE))
-    
-    if (!is.finite(max_cap)) {
-      max_cap <- 100
-    }
+    if (!is.finite(max_cap)) max_cap <- 100
     
     cap_slider_max(ceiling(max_cap))
     
@@ -2019,11 +1923,6 @@ server <- function(input, output, session) {
     )
   }, ignoreNULL = FALSE)
   
-  # ----------------------------------------------------------
-  # Upcoming Capacity country choices
-  # Based ONLY on raw_pipeline(); independent of the map scope.
-  # ----------------------------------------------------------
-  
   observeEvent(raw_pipeline(), {
     countries <- raw_pipeline() %>%
       filter(!is.na(Country), Country != "") %>%
@@ -2031,11 +1930,7 @@ server <- function(input, output, session) {
       arrange(Country) %>%
       pull(Country)
     
-    updateSelectizeInput(
-      session, "pipeline_country_filter",
-      choices = countries,
-      server = TRUE
-    )
+    updateSelectizeInput(session, "pipeline_country_filter", choices = countries, server = TRUE)
     
     pl_states <- raw_pipeline() %>%
       filter(is_us, !is.na(State), State != "") %>%
@@ -2043,16 +1938,8 @@ server <- function(input, output, session) {
       arrange(State) %>%
       pull(State)
     
-    updateSelectizeInput(
-      session, "pipeline_state_filter",
-      choices = pl_states,
-      server = TRUE
-    )
+    updateSelectizeInput(session, "pipeline_state_filter", choices = pl_states, server = TRUE)
   }, ignoreNULL = FALSE)
-  
-  # ----------------------------------------------------------
-  # City choices
-  # ----------------------------------------------------------
   
   observeEvent(
     list(raw_data(), input$scope, input$state_filter, input$country_filter),
@@ -2069,10 +1956,6 @@ server <- function(input, output, session) {
     },
     ignoreNULL = FALSE
   )
-  
-  # ----------------------------------------------------------
-  # Operator choices
-  # ----------------------------------------------------------
   
   observeEvent(
     list(raw_data(), input$scope, input$state_filter,
@@ -2099,48 +1982,34 @@ server <- function(input, output, session) {
   # Sidebar helpers
   # ----------------------------------------------------------
   
-  fmt <- function(x) format(round(x), big.mark = ",")
-  
-  # Live results summary (changes with the active tab)
   output$sb_summary <- renderUI({
     if (identical(input$main_tabs, "Upcoming Capacity")) {
-      df <- filtered_pipeline()
-      n <- nrow(df)
+      n <- nrow(filtered_pipeline())
       total <- nrow(raw_pipeline())
-      mw <- sum(df$MW_available, na.rm = TRUE)
       label <- "upcoming entries"
     } else {
-      df <- filtered()
-      n <- nrow(df)
+      n <- nrow(filtered())
       total <- nrow(raw_data())
-      mw <- sum(df$Capacity_MW_est, na.rm = TRUE)
       label <- "sites"
     }
     
     div(
       class = "sb-summary",
       div(class = "sb-summary-main",
-          tags$b(fmt(n)), paste0(" of ", fmt(total), " ", label)),
+          tags$b(fmt(n)), paste0(" of ", fmt(total), " ", label))
     )
   })
   
-  # Search feedback: how many results, or what to try when there are none
   output$search_status <- renderUI({
     term <- search_raw_d()
     
-    if (!nzchar(term)) {
-      return(NULL)
-    }
+    if (!nzchar(term)) return(NULL)
     
     on_pipeline <- identical(input$main_tabs, "Upcoming Capacity")
     
     n <- if (on_pipeline) nrow(filtered_pipeline()) else nrow(filtered())
     
-    noun <- if (on_pipeline) {
-      c("upcoming entry", "upcoming entries")
-    } else {
-      c("site", "sites")
-    }
+    noun <- if (on_pipeline) c("upcoming entry", "upcoming entries") else c("site", "sites")
     
     shown_term <- gsub('"', "", term, fixed = TRUE)
     
@@ -2161,7 +2030,6 @@ server <- function(input, output, session) {
     }
   })
   
-  # Removable filter chips
   output$filter_chips <- renderUI({
     make <- function(type, vals) {
       lapply(vals, function(v) {
@@ -2205,8 +2073,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Presets
-  # Highlight toggle (button at the bottom of the sidebar)
+  # Highlight toggle
   highlight_on <- reactiveVal(FALSE)
   
   observeEvent(input$highlight_toggle, {
@@ -2217,18 +2084,16 @@ server <- function(input, output, session) {
     session$sendCustomMessage("hl_state", highlight_on())
   }, ignoreInit = TRUE)
   
-  # Slider <-> typed-number boxes (drag OR type)
+  # Slider <-> typed number boxes
   sync_range <- function(id, max_fn) {
     lo_id <- paste0(id, "_lo")
     hi_id <- paste0(id, "_hi")
     
-    # slider -> boxes
     observeEvent(input[[id]], {
       updateNumericInput(session, lo_id, value = input[[id]][1])
       updateNumericInput(session, hi_id, value = input[[id]][2])
     })
     
-    # boxes -> slider
     observeEvent(list(input[[lo_id]], input[[hi_id]]), {
       lo <- input[[lo_id]]
       hi <- input[[hi_id]]
@@ -2238,14 +2103,13 @@ server <- function(input, output, session) {
       a <- min(max(min(lo, hi), 0), mx)
       b <- min(max(max(lo, hi), 0), mx)
       
-      # Show the clamped / re-ordered values back in the boxes
       if (a != lo || b != hi) {
         updateNumericInput(session, lo_id, value = a)
         updateNumericInput(session, hi_id, value = b)
       }
       
-      cur <- input[[id]]
-      if (is.null(cur) || abs(cur[1] - a) > 1e-9 || abs(cur[2] - b) > 1e-9) {
+      cur_val <- input[[id]]
+      if (is.null(cur_val) || abs(cur_val[1] - a) > 1e-9 || abs(cur_val[2] - b) > 1e-9) {
         updateSliderInput(session, id, value = c(a, b))
       }
     }, ignoreInit = TRUE)
@@ -2254,20 +2118,8 @@ server <- function(input, output, session) {
   sync_range("capacity_filter", cap_slider_max)
   sync_range("pipeline_mw_filter", pipe_slider_max)
   
-  # Data freshness footer
-  output$data_freshness <- renderText({
-    refresh_trigger()
-    
-    v <- list_versions() %>%
-      filter(!grepl("^Auto-snapshot", note))
-    
-    if (nrow(v) == 0) return("No data loaded yet")
-    
-    paste0("Data refreshed ", substr(v$timestamp[1], 1, 16), " \u00b7 v", v$version[1])
-  })
-  
   # ----------------------------------------------------------
-  # Reset (defaults to Global, always resets capacity sliders)
+  # Reset
   # ----------------------------------------------------------
   
   observeEvent(input$reset_filters, {
@@ -2286,20 +2138,14 @@ server <- function(input, output, session) {
     gmax <- suppressWarnings(max(raw_data()$Capacity_MW_est, na.rm = TRUE))
     if (!is.finite(gmax)) gmax <- 100
     
-    updateSliderInput(
-      session, "capacity_filter",
-      max = ceiling(gmax),
-      value = c(0, ceiling(gmax))
-    )
+    updateSliderInput(session, "capacity_filter",
+                      max = ceiling(gmax), value = c(0, ceiling(gmax)))
     
     pmax_mw <- suppressWarnings(max(raw_pipeline()$MW_available, na.rm = TRUE))
     if (!is.finite(pmax_mw)) pmax_mw <- 100
     
-    updateSliderInput(
-      session, "pipeline_mw_filter",
-      max = ceiling(pmax_mw),
-      value = c(0, ceiling(pmax_mw))
-    )
+    updateSliderInput(session, "pipeline_mw_filter",
+                      max = ceiling(pmax_mw), value = c(0, ceiling(pmax_mw)))
   })
   
   # ----------------------------------------------------------
@@ -2317,7 +2163,6 @@ server <- function(input, output, session) {
       df <- df %>% filter(Operator %in% input$operator_filter)
     }
     
-    # Free-text search
     df <- apply_search(df, c("Operator", "City_clean", "State", "Country",
                              "Region", "Cooling", "Notes", "Contacts"))
     
@@ -2330,19 +2175,13 @@ server <- function(input, output, session) {
   })
   
   # ----------------------------------------------------------
-  # Pipeline filtering
-  #
-  # Intentionally independent of the Data Centers filters:
-  # - US-only scope does NOT remove Indonesia
-  # - State / country / city / operator filters do NOT affect it
-  # It has its own country, quarter, and MW filters.
-  # The search bar applies to both tabs.
+  # Pipeline filtering (independent of the Data Centers filters;
+  # the search bar applies to both tabs)
   # ----------------------------------------------------------
   
   filtered_pipeline <- reactive({
     df <- raw_pipeline()
     
-    # Upcoming Capacity has its own US / Global scope.
     if (identical(input$pipeline_scope, "us")) {
       df <- df %>% filter(is_us)
       
@@ -2365,39 +2204,23 @@ server <- function(input, output, session) {
         )
     }
     
-    # Free-text search
     df <- apply_search(df, c("Operator", "City_clean", "State", "Country",
                              "Region", "Quarter"))
     
-    df %>%
-      arrange(Quarter_Date, Operator, Country, State, City_clean)
+    df %>% arrange(Quarter_Date, Operator, Country, State, City_clean)
   })
-  
-  # ----------------------------------------------------------
-  # Set maximum for upcoming MW slider
-  # ----------------------------------------------------------
   
   observeEvent(raw_pipeline(), {
     max_mw <- suppressWarnings(max(raw_pipeline()$MW_available, na.rm = TRUE))
-    
-    if (!is.finite(max_mw)) {
-      max_mw <- 100
-    }
+    if (!is.finite(max_mw)) max_mw <- 100
     
     pipe_slider_max(ceiling(max_mw))
     
-    updateSliderInput(
-      session, "pipeline_mw_filter",
-      max = ceiling(max_mw),
-      value = c(0, ceiling(max_mw))
-    )
-    
+    updateSliderInput(session, "pipeline_mw_filter",
+                      max = ceiling(max_mw), value = c(0, ceiling(max_mw)))
   }, ignoreNULL = FALSE)
   
-  # ----------------------------------------------------------
-  # Year shortcut buttons for the Quarter filter
-  # ----------------------------------------------------------
-  
+  # Year shortcut buttons
   for (yr in 2026:2029) {
     local({
       y <- yr
@@ -2410,16 +2233,14 @@ server <- function(input, output, session) {
     })
   }
   
-  # ==========================================================
-  # UPCOMING HIGHLIGHT LOGIC
-  # ==========================================================
+  # ----------------------------------------------------------
+  # "Coming soon" highlight logic
+  # ----------------------------------------------------------
   
   upcoming_soon_keys <- reactive({
     pl <- raw_pipeline()
     
-    if (nrow(pl) == 0) {
-      return(character(0))
-    }
+    if (nrow(pl) == 0) return(character(0))
     
     today_q <- as.Date(cut(Sys.Date(), "quarter"))
     
@@ -2438,46 +2259,27 @@ server <- function(input, output, session) {
   })
   
   # ==========================================================
-  # VALUE BOXES
+  # KPI tiles
   # ==========================================================
   
-  output$vb_operators <- renderText({
-    n_distinct(filtered()$Operator)
-  })
+  output$vb_operators <- renderText(n_distinct(filtered()$Operator))
+  output$vb_cities <- renderText(n_distinct(filtered()$City_clean))
+  output$vb_capacity <- renderText(fmt(sum(filtered()$Capacity_MW_est, na.rm = TRUE)))
   
-  output$vb_cities <- renderText({
-    n_distinct(filtered()$City_clean)
-  })
-  
-  output$vb_capacity <- renderText({
-    total <- sum(filtered()$Capacity_MW_est, na.rm = TRUE)
-    format(round(total), big.mark = ",")
-  })
-  
-  output$vb_pipeline_entries <- renderText({
-    nrow(filtered_pipeline())
-  })
-  
+  output$vb_pipeline_entries <- renderText(nrow(filtered_pipeline()))
   output$vb_pipeline_sites <- renderText({
     filtered_pipeline() %>%
       distinct(Operator, City_clean, State, Country) %>%
       nrow()
   })
-  
-  output$vb_pipeline_mw <- renderText({
-    format(round(sum(filtered_pipeline()$MW_available, na.rm = TRUE)), big.mark = ",")
-  })
+  output$vb_pipeline_mw <- renderText(fmt(sum(filtered_pipeline()$MW_available, na.rm = TRUE)))
   
   # ==========================================================
-  # MAP
+  # DATA CENTERS MAP
   # ==========================================================
   
   output$map <- renderLeaflet({
-    leaflet(options = leafletOptions(
-      worldCopyJump = FALSE,
-      minZoom = 2,
-      maxZoom = 18
-    )) %>%
+    leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18)) %>%
       addTiles(
         urlTemplate = CARTO_POSITRON_URL,
         attribution = CARTO_ATTRIBUTION,
@@ -2488,8 +2290,6 @@ server <- function(input, output, session) {
       addEasyButton(reset_view_button("map_reset"))
   })
   
-  # Recenters the map when scope changes (US or global)
-  # Recenters the map (used by the scope toggle and the reset button)
   reset_map_view <- function() {
     proxy <- leafletProxy("map")
     
@@ -2502,6 +2302,7 @@ server <- function(input, output, session) {
   
   reset_pipeline_view <- function() {
     proxy <- leafletProxy("pipeline_map")
+    
     if (identical(input$pipeline_scope, "us")) {
       proxy %>% setView(lng = -98.5, lat = 39.5, zoom = 4)
     } else {
@@ -2511,12 +2312,10 @@ server <- function(input, output, session) {
   
   observeEvent(input$pipeline_scope, reset_pipeline_view(), ignoreInit = TRUE)
   observeEvent(input$scope, reset_map_view(), ignoreInit = TRUE)
-  
   observeEvent(input$map_reset, reset_map_view())
   observeEvent(input$pipeline_map_reset, reset_pipeline_view())
   
-  # Searching zooms the Data Centers map to the matching sites;
-  # clearing the search puts the view back.
+  # Searching zooms the map to the matching sites; clearing resets the view
   observeEvent(search_raw_d(), {
     req(identical(input$main_tabs, "Data Centers"))
     
@@ -2525,28 +2324,17 @@ server <- function(input, output, session) {
       return()
     }
     
-    pts <- filtered() %>%
-      filter(!is.na(Latitude), !is.na(Longitude))
+    pts <- filtered() %>% filter(!is.na(Latitude), !is.na(Longitude))
     
-    if (nrow(pts) == 0) {
-      return()
-    }
+    if (nrow(pts) == 0) return()
     
-    leafletProxy("map") %>%
-      fit_points(pts$Latitude, pts$Longitude)
+    leafletProxy("map") %>% fit_points(pts$Latitude, pts$Longitude)
   }, ignoreInit = TRUE)
   
-  ##############################
-  # DATA CENTERS MAP MARKERS
-  #  - Heat colors + sizes by current MW (same palette as Upcoming map)
-  #  - Sites with no current capacity are gray
-  #  - "Highlight coming soon" turns sites arriving in the next
-  #    4 quarters orange (gray ones included)
-  #  - Nearby dots cluster; bubbles are colored to match
-  ##############################
+  # Markers: heat colour + size by MW, gray = no capacity info,
+  # orange = arriving in the next 4 quarters (when highlight is on)
   observe({
-    df <- filtered() %>%
-      filter(!is.na(Latitude), !is.na(Longitude))
+    df <- filtered() %>% filter(!is.na(Latitude), !is.na(Longitude))
     
     keys <- upcoming_soon_keys()
     
@@ -2567,7 +2355,6 @@ server <- function(input, output, session) {
         key = paste(Operator, City_clean, State, Country, sep = "|"),
         is_upcoming_soon = if (isTRUE(highlight_on())) key %in% keys else FALSE,
         
-        # Three capacity states
         has_capacity = !is.na(Capacity_MW_est) & Capacity_MW_est > 0,
         is_zero      = !is.na(Capacity_MW_est) & Capacity_MW_est == 0,
         no_info      = is.na(Capacity_MW_est),
@@ -2579,12 +2366,23 @@ server <- function(input, output, session) {
         )),
         cap_txt = htmltools::htmlEscape(enc2utf8(coalesce(Capacity, "No info"))),
         cool_txt = htmltools::htmlEscape(enc2utf8(coalesce(Cooling, "Unknown"))),
+        notes_txt = htmltools::htmlEscape(enc2utf8(coalesce(Notes, ""))),
         popup_html = paste0(
-          "<div style='min-width:200px'>",
+          "<div style='min-width:200px; max-width:280px'>",
           "<b>", op_txt, "</b><br>",
           city_txt, ", ", place_txt, "<br>",
           "Capacity: ", cap_txt,
           if_else(is.na(Cooling), "", paste0("<br>Cooling: ", cool_txt)),
+          # Native <details>: the browser keeps it closed until it is clicked
+          if_else(
+            is.na(Notes) | Notes == "", "",
+            paste0(
+              "<details class='map-note'>",
+              "<summary><span class='map-note-i'>i</span>Notes</summary>",
+              "<div class='map-note-body'>", notes_txt, "</div>",
+              "</details>"
+            )
+          ),
           if_else(
             is_upcoming_soon,
             "<br><b style='color:#F59E0B'>Capacity coming available soon - see Upcoming Capacity tab</b>",
@@ -2602,7 +2400,6 @@ server <- function(input, output, session) {
     
     if (nrow(df) == 0) return()
     
-    # ---- Heat palette (same colors as the Upcoming Capacity map) ----
     cap_vals <- df$Capacity_MW_est[df$has_capacity]
     min_mw <- suppressWarnings(min(cap_vals, na.rm = TRUE))
     max_mw <- suppressWarnings(max(cap_vals, na.rm = TRUE))
@@ -2626,10 +2423,10 @@ server <- function(input, output, session) {
           6
         ),
         fill_col = case_when(
-          is_upcoming_soon ~ "#F59E0B",       # orange when highlighted
-          has_capacity     ~ pal(heat_val),   # heat color
-          is_zero          ~ "#E5E7EB",       # lighter gray, 0 MW
-          TRUE             ~ "#9CA3AF"        # darker gray - no info
+          is_upcoming_soon ~ "#F59E0B",
+          has_capacity     ~ pal(heat_val),
+          is_zero          ~ "#E5E7EB",
+          TRUE             ~ "#9CA3AF"
         ),
         border_col = case_when(
           is_upcoming_soon ~ "#FCD34D",
@@ -2637,7 +2434,6 @@ server <- function(input, output, session) {
           TRUE             ~ "#D1D5DB"
         )
       ) %>%
-      # Large sites draw first; small / gray ones land on top
       arrange(desc(has_capacity), desc(Capacity_MW_est))
     
     proxy %>%
@@ -2661,8 +2457,7 @@ server <- function(input, output, session) {
         )
       )
     
-    # ---- Custom legend: gradient bar + gray / orange dots ----
-    any_gray  <- any(df$no_info)
+    any_gray <- any(df$no_info)
     any_orange <- any(df$is_upcoming_soon)
     
     legend_html <- paste0(
@@ -2691,8 +2486,77 @@ server <- function(input, output, session) {
       "</div>"
     )
     
-    proxy %>%
-      addControl(html = legend_html, position = "bottomright", className = "")
+    proxy %>% addControl(html = legend_html, position = "bottomright", className = "")
+  })
+  
+  # ==========================================================
+  # DATA CENTERS CHARTS
+  # ==========================================================
+  
+  output$top_operators_chart <- renderPlotly({
+    df <- filtered() %>%
+      filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0) %>%
+      mutate(Operator = coalesce(Operator, "Unknown operator")) %>%
+      group_by(Operator) %>%
+      summarise(MW = sum(Capacity_MW_est, na.rm = TRUE),
+                Sites = n(), .groups = "drop") %>%
+      arrange(desc(MW)) %>%
+      slice_head(n = 10)
+    
+    if (nrow(df) == 0) return(empty_plot("No capacity matches the current search and filters."))
+    
+    df <- df %>% mutate(Operator = factor(Operator, levels = rev(Operator)))
+    
+    plot_ly(
+      df, x = ~MW, y = ~Operator, type = "bar", orientation = "h",
+      text = ~fmt(MW), textposition = "outside", cliponaxis = FALSE,
+      textfont = list(color = "#CBD5E1"),
+      hovertext = ~paste0("<b>", Operator, "</b><br>", fmt(MW), " MW across ",
+                          Sites, if_else(Sites == 1L, " site", " sites")),
+      hoverinfo = "text",
+      marker = list(color = "#3B82F6")
+    ) %>%
+      dark_plot(
+        xaxis = list(title = NULL, gridcolor = "#1E2A3A", zeroline = FALSE,
+                     tickfont = list(color = "#94A3B8")),
+        yaxis = list(title = NULL, tickfont = list(color = "#CBD5E1")),
+        margin = list(l = 10, r = 50, t = 10, b = 30),
+        showlegend = FALSE
+      )
+  })
+  
+  output$country_share_chart <- renderPlotly({
+    df <- filtered() %>%
+      filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0) %>%
+      mutate(Country = coalesce(Country, "Unknown")) %>%
+      group_by(Country) %>%
+      summarise(MW = sum(Capacity_MW_est, na.rm = TRUE), .groups = "drop") %>%
+      arrange(desc(MW))
+    
+    if (nrow(df) == 0) return(empty_plot("No capacity matches the current search and filters."))
+    
+    if (nrow(df) > 7) {
+      df <- bind_rows(
+        df %>% slice_head(n = 7),
+        tibble(Country = "Other", MW = sum(df$MW[8:nrow(df)]))
+      )
+    }
+    
+    cols <- c("#1D4ED8", "#3B82F6", "#60A5FA", "#93C5FD", "#2DD4BF",
+              "#F59E0B", "#A78BFA", "#64748B")[seq_len(nrow(df))]
+    
+    plot_ly(
+      df, labels = ~Country, values = ~MW, type = "pie", hole = 0.62,
+      sort = FALSE, direction = "clockwise",
+      textinfo = "none",
+      hovertemplate = "<b>%{label}</b><br>%{value:,.0f} MW (%{percent})<extra></extra>",
+      marker = list(colors = cols, line = list(color = "#0F1620", width = 2))
+    ) %>%
+      dark_plot(
+        showlegend = TRUE,
+        legend = list(font = list(color = "#CBD5E1", size = 12)),
+        margin = list(l = 10, r = 10, t = 10, b = 10)
+      )
   })
   
   # ==========================================================
@@ -2700,15 +2564,10 @@ server <- function(input, output, session) {
   # ==========================================================
   
   output$pipeline_map <- renderLeaflet({
-    # Rendered from the SAME reactive dataset as the Upcoming Capacity table.
     df <- filtered_pipeline()
     searching <- nzchar(search_raw_d())
     
-    base_map <- leaflet(options = leafletOptions(
-      worldCopyJump = FALSE,
-      minZoom = 2,
-      maxZoom = 18
-    )) %>%
+    base_map <- leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18)) %>%
       addTiles(
         urlTemplate = CARTO_POSITRON_URL,
         attribution = CARTO_ATTRIBUTION,
@@ -2722,12 +2581,8 @@ server <- function(input, output, session) {
       ) %>%
       addEasyButton(reset_view_button("pipeline_map_reset"))
     
-    if (nrow(df) == 0) {
-      return(base_map)
-    }
+    if (nrow(df) == 0) return(base_map)
     
-    # Give every upcoming row a location. Prefer exact geocoded
-    # coordinates; otherwise use the country centroid.
     df <- df %>%
       left_join(
         country_centroids %>%
@@ -2739,8 +2594,7 @@ server <- function(input, output, session) {
         map_base_lng = coalesce(Longitude, Country_Longitude)
       )
     
-    # If several upcoming rows are at the same location, spread
-    # them slightly so each quarter/capacity row can be clicked.
+    # Spread rows at the same location so each one can be clicked
     df <- df %>%
       group_by(map_base_lat, map_base_lng) %>%
       mutate(
@@ -2757,9 +2611,7 @@ server <- function(input, output, session) {
     map_df <- df %>%
       filter(!is.na(map_lat), !is.na(map_lng), !is.na(MW_available), MW_available >= 0)
     
-    if (nrow(map_df) == 0) {
-      return(base_map)
-    }
+    if (nrow(map_df) == 0) return(base_map)
     
     min_mw <- min(map_df$MW_available, na.rm = TRUE)
     max_mw <- max(map_df$MW_available, na.rm = TRUE)
@@ -2779,19 +2631,21 @@ server <- function(input, output, session) {
       6 + 12 * sqrt((map_df$MW_available - min_mw) / (max_mw - min_mw))
     }
     
+    esc <- function(x) htmltools::htmlEscape(enc2utf8(as.character(x)))
+    
     popup_text <- paste0(
       "<div style='min-width:210px'>",
       "<b style='font-size:15px'>",
-      ifelse(is.na(map_df$Operator), "Unknown operator", map_df$Operator),
+      ifelse(is.na(map_df$Operator), "Unknown operator", esc(map_df$Operator)),
       "</b><br>",
       ifelse(
         is.na(map_df$City_clean) | map_df$City_clean == "",
-        map_df$Country,
-        map_df$City_clean
+        esc(map_df$Country),
+        esc(map_df$City_clean)
       ),
       ifelse(
         !is.na(map_df$State) & map_df$State != "",
-        paste0(", ", map_df$State),
+        paste0(", ", esc(map_df$State)),
         ""
       ),
       "<br><br>",
@@ -2822,19 +2676,15 @@ server <- function(input, output, session) {
         labFormat = labelFormat(suffix = " MW")
       )
     
-    # While searching, zoom to the matching entries
-    if (searching) {
-      m <- fit_points(m, map_df$map_lat, map_df$map_lng)
-    }
+    if (searching) m <- fit_points(m, map_df$map_lat, map_df$map_lng)
     
     m
   })
   
   # ==========================================================
-  # CURRENT TABLE
+  # CURRENT TABLE (with notes buttons)
   # ==========================================================
-
-  # Shared so the table and the download always match
+  
   table_data <- reactive({
     filtered() %>%
       select(
@@ -2844,182 +2694,156 @@ server <- function(input, output, session) {
         Country,
         Region,
         Capacity,
-        `Capacity (MW est.)` = Capacity_MW_est
+        `Capacity (MW est.)` = Capacity_MW_est,
+        Notes
       ) %>%
       arrange(Operator, Country, State, City)
   })
   
-  # dom = "lrtip" drops the table's own search box, since the
-  # sidebar search bar now filters the map, cards, and table together.
   output$table <- renderDT({
-    table_data()
-  }, options = list(
-    pageLength = 15,
-    dom = "lrtip",
-    language = list(
-      emptyTable = "No sites match the current search and filters.",
-      zeroRecords = "No sites match the current search and filters."
+    df <- table_data()
+    
+    has_note <- !is.na(df$Notes) & nzchar(df$Notes)
+    
+    # The (i) button carries the note text; the server turns a click into a modal.
+    # Sub-title per row: "City, State"
+    sub_txt <- mapply(function(ct, st) {
+      paste(c(ct, st)[!is.na(c(ct, st)) & nzchar(c(ct, st))], collapse = ", ")
+    }, df$City, df$State, USE.NAMES = FALSE)
+    
+    note_btn <- ifelse(
+      has_note,
+      sprintf(
+        "<button type='button' class='note-btn' aria-label='View notes' title='View notes' data-title='%s' data-sub='%s' data-note='%s'>i</button>",
+        htmltools::htmlEscape(coalesce(df$Operator, "Unknown operator"), attribute = TRUE),
+        htmltools::htmlEscape(sub_txt, attribute = TRUE),
+        htmltools::htmlEscape(coalesce(df$Notes, ""), attribute = TRUE)
+      ),
+      "<span class='note-none'>&ndash;</span>"
     )
-  ), rownames = FALSE)
+    
+    # Escape the text columns since the table renders HTML for the button column
+    df <- df %>%
+      mutate(across(
+        where(is.character),
+        ~ ifelse(is.na(.x), "", htmltools::htmlEscape(.x))
+      ))
+    
+    df$Notes <- note_btn
+    
+    dt <- datatable(
+      df,
+      rownames = FALSE,
+      escape = FALSE,
+      class = "compact hover",
+      selection = "none",
+      options = list(
+        pageLength = 15,
+        dom = "lfrtip",
+        columnDefs = list(list(
+          targets = ncol(df) - 1,
+          orderable = FALSE, searchable = FALSE,
+          className = "dt-center", width = "60px"
+        )),
+        language = list(
+          emptyTable = "No sites match the current search and filters.",
+          zeroRecords = "No sites match the current search and filters."
+        )
+      )
+    )
+    
+    add_color_bar(dt, df, "Capacity (MW est.)")
+  })
+  
+  # Notes modal: only opens when an (i) button is clicked
+  observeEvent(input$note_click, {
+    n <- input$note_click
+    req(n$note, nzchar(n$note))
+    
+    showModal(modalDialog(
+      title = div(
+        div(class = "note-modal-op", n$title),
+        if (nzchar(n$sub)) div(class = "note-modal-sub", n$sub)
+      ),
+      div(class = "note-modal-body", n$note),
+      easyClose = TRUE,
+      size = "m",
+      footer = modalButton("Close")
+    ))
+  })
   
   output$download_filtered <- downloadHandler(
     filename = function() {
       paste0("data_centers_filtered_", format(Sys.Date(), "%Y%m%d"), ".csv")
     },
     content = function(file) {
-      write.csv(table_data(), file, row.names = FALSE, na = "")
+      write.csv(table_data() %>% select(-Notes), file, row.names = FALSE, na = "")
     }
   )
   
-  ##
+  # ==========================================================
   # UPCOMING CAPACITY BY QUARTER
   # ==========================================================
   
   output$pipeline_quarter_chart <- renderPlotly({
-    
     df <- filtered_pipeline()
     
     if (nrow(df) == 0) {
-      return(
-        plot_ly() %>%
-          layout(
-            paper_bgcolor = "#111827",
-            plot_bgcolor = "#111827",
-            font = list(color = "#E2E8F0", family = "Inter"),
-            xaxis = list(visible = FALSE),
-            yaxis = list(visible = FALSE),
-            annotations = list(
-              list(
-                text = "No upcoming capacity matches the current search and filters.",
-                x = 0.5,
-                y = 0.5,
-                xref = "paper",
-                yref = "paper",
-                showarrow = FALSE,
-                font = list(size = 14, color = "#94A3B8")
-              )
-            )
-          )
-      )
+      return(empty_plot("No upcoming capacity matches the current search and filters."))
     }
     
-    # Total MW by quarter
-    quarter_totals <- df %>%
+    df <- df %>%
       mutate(
         Quarter = factor(Quarter, levels = QUARTER_COLS),
-        Operator = if_else(
-          is.na(Operator) | Operator == "",
-          "Unknown operator",
-          Operator
-        )
-      ) %>%
-      group_by(Quarter) %>%
-      summarise(
-        MW = sum(MW_available, na.rm = TRUE),
-        .groups = "drop"
+        Operator = if_else(is.na(Operator) | Operator == "", "Unknown operator", Operator)
       )
     
-    # Operator breakdown for hover
+    quarter_totals <- df %>%
+      group_by(Quarter) %>%
+      summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop")
+    
     operator_breakdown <- df %>%
-      mutate(
-        Quarter = factor(Quarter, levels = QUARTER_COLS),
-        Operator = if_else(
-          is.na(Operator) | Operator == "",
-          "Unknown operator",
-          Operator
-        )
-      ) %>%
       group_by(Quarter, Operator) %>%
-      summarise(
-        MW = sum(MW_available, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
+      summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop") %>%
+      arrange(Quarter, desc(MW)) %>%
       group_by(Quarter) %>%
       summarise(
         Breakdown = paste0(
           "<b>", Operator, "</b>: ",
-          format(round(MW, 1), big.mark = ","),
-          " MW",
+          format(round(MW, 1), big.mark = ","), " MW",
           collapse = "<br>"
         ),
         .groups = "drop"
       )
     
-    chart_data <- quarter_totals %>%
-      left_join(operator_breakdown, by = "Quarter")
+    chart_data <- quarter_totals %>% left_join(operator_breakdown, by = "Quarter")
     
     plot_ly(
       data = chart_data,
-      x = ~Quarter,
-      y = ~MW,
-      type = "bar",
-      
+      x = ~Quarter, y = ~MW, type = "bar",
       text = ~format(round(MW, 1), big.mark = ","),
-      textposition = "outside",
-      
+      textposition = "outside", cliponaxis = FALSE,
+      textfont = list(color = "#CBD5E1"),
       hovertext = ~paste0(
         "<b>", Quarter, "</b>",
         "<br><b>Total: ", format(round(MW, 1), big.mark = ","), " MW</b>",
-        "<br><br>",
-        Breakdown
+        "<br><br>", Breakdown
       ),
-      
       hoverinfo = "text",
-      
-      marker = list(
-        color = "#3B82F6"
-      )
+      marker = list(color = "#3B82F6")
     ) %>%
-      
-      layout(
-        paper_bgcolor = "#111827",
-        plot_bgcolor = "#111827",
-        
-        font = list(
-          color = "#E2E8F0",
-          family = "Inter"
-        ),
-        
-        title = list(
-          text = "Capacity coming online by quarter",
-          font = list(
-            size = 16,
-            color = "#F9FAFB"
-          )
-        ),
-        
+      dark_plot(
         xaxis = list(
-          title = NULL,
-          categoryorder = "array",
-          categoryarray = QUARTER_COLS,
-          tickfont = list(color = "#CBD5E1"),
-          gridcolor = "#1F2937",
-          linecolor = "#374151"
+          title = NULL, categoryorder = "array", categoryarray = QUARTER_COLS,
+          tickfont = list(color = "#CBD5E1"), gridcolor = "#1E2A3A", linecolor = "#2A3A50"
         ),
-        
         yaxis = list(
-          title = "Upcoming capacity (MW)",
-          titlefont = list(color = "#CBD5E1"),
-          tickfont = list(color = "#CBD5E1"),
-          gridcolor = "#1F2937",
-          zerolinecolor = "#374151"
+          title = list(text = "Upcoming capacity (MW)", font = list(color = "#CBD5E1")),
+          tickfont = list(color = "#CBD5E1"), gridcolor = "#1E2A3A", zerolinecolor = "#2A3A50"
         ),
-        
         hovermode = "closest",
-        
-        margin = list(
-          l = 65,
-          r = 30,
-          t = 65,
-          b = 60
-        ),
-        
+        margin = list(l = 65, r = 30, t = 30, b = 60),
         showlegend = FALSE
-      ) %>%
-      
-      config(
-        displayModeBar = FALSE,
-        responsive = TRUE
       )
   })
   
@@ -3027,7 +2851,6 @@ server <- function(input, output, session) {
   # UPCOMING CAPACITY TABLE
   # ==========================================================
   
-  # Shared so the table and the download always match
   pipeline_table_data <- reactive({
     filtered_pipeline() %>%
       mutate(Quarter_Order = match(Quarter, QUARTER_COLS)) %>%
@@ -3055,18 +2878,22 @@ server <- function(input, output, session) {
       ))
     }
     
-    datatable(
+    dt <- datatable(
       df,
       rownames = FALSE,
+      class = "compact hover",
+      width = "100%",
+      selection = "none",
       options = list(
         pageLength = 25,
-        dom = "lrtip",
-        scrollX = TRUE,
-        autoWidth = TRUE,
+        dom = "lfrtip",
+        autoWidth = FALSE,
         order = list(list(7, "asc")),
         columnDefs = list(list(visible = FALSE, targets = 7))
       )
     )
+    
+    add_color_bar(dt, df, "MW Available")
   })
   
   output$download_pipeline <- downloadHandler(
@@ -3079,11 +2906,10 @@ server <- function(input, output, session) {
         write.csv(file, row.names = FALSE, na = "")
     }
   )
+  
   # ==========================================================
   # REFRESH FROM DC.XLSX
   # ==========================================================
-  
-  refresh_trigger <- reactiveVal(0)
   
   output$refresh_status <- renderUI({
     refresh_trigger()
@@ -3094,13 +2920,11 @@ server <- function(input, output, session) {
       return(tags$p("No Excel refresh has been performed yet."))
     }
     
-    latest <- versions %>%
-      arrange(desc(version)) %>%
-      slice(1)
+    latest <- versions %>% arrange(desc(version)) %>% slice(1)
     
     tags$p(
-      strong("Latest database update: "),
-      latest$timestamp,
+      class = "version-note",
+      strong("Latest database update: "), latest$timestamp,
       tags$br(),
       "Version: ", latest$version,
       tags$br(),
@@ -3110,7 +2934,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # Step 1: the button only opens a password prompt.
   observeEvent(input$refresh_excel, {
     showModal(modalDialog(
       title = "Password required",
@@ -3123,7 +2946,6 @@ server <- function(input, output, session) {
     ))
   })
   
-  # Step 2: the refresh only runs if the password matches.
   observeEvent(input$confirm_refresh, {
     if (!identical(input$refresh_pw, REFRESH_PASSWORD)) {
       showNotification("Incorrect password.", type = "error", duration = 5)
@@ -3136,8 +2958,7 @@ server <- function(input, output, session) {
       showNotification(
         paste0("Could not find ", MASTER_FILE,
                ". Make sure it is in the same folder as app.R."),
-        type = "error",
-        duration = 10
+        type = "error", duration = 10
       )
       return()
     }
@@ -3151,30 +2972,25 @@ server <- function(input, output, session) {
         )
       })
       
-      # Update reactive data immediately.
       raw_data(load_current())
       raw_pipeline(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
       refresh_trigger(refresh_trigger() + 1)
       
       showNotification(
-        paste0(
-          "DC.xlsx imported successfully: ",
-          nrow(result$current), " sites and ",
-          nrow(result$pipeline), " upcoming-capacity entries."
-        ),
-        type = "message",
-        duration = 8
+        paste0("DC.xlsx imported: ", nrow(result$current), " sites and ",
+               nrow(result$pipeline), " upcoming-capacity entries."),
+        type = "message", duration = 8
       )
     }, error = function(e) {
       showNotification(
         paste("Excel refresh failed:", conditionMessage(e)),
-        type = "error",
-        duration = 12
+        type = "error", duration = 12
       )
     })
   })
+  
   # ==========================================================
-  # VERSION HISTORY TABLE
+  # VERSION HISTORY
   # ==========================================================
   
   output$version_table <- renderDT({
@@ -3183,7 +2999,8 @@ server <- function(input, output, session) {
     versions <- list_versions()
     
     if (nrow(versions) == 0) {
-      return(datatable(tibble(Message = "No versions yet.")))
+      return(datatable(tibble(Message = "No versions yet."), rownames = FALSE,
+                       options = list(dom = "t")))
     }
     
     versions %>%
@@ -3198,39 +3015,29 @@ server <- function(input, output, session) {
       datatable(
         selection = "single",
         rownames = FALSE,
+        class = "compact hover",
         options = list(pageLength = 10)
       )
   })
   
-  # ==========================================================
-  # RESTORE VERSION
-  # ==========================================================
-  
   observeEvent(input$version_table_rows_selected, {
     sel <- input$version_table_rows_selected
-    
     req(sel)
     
-    versions <- list_versions() %>%
-      arrange(desc(version))
-    
+    versions <- list_versions() %>% arrange(desc(version))
     v <- versions$version[sel]
     
     showModal(modalDialog(
       title = paste("Restore version", v, "?"),
-      
       p(paste0(
-        "This will make version ", v, " live again. ",
-        "The current data will be snapshotted first, so this is safe to undo."
+        "This makes version ", v, " live again. ",
+        "The current data is saved first, so you can undo this."
       )),
-      
       passwordInput("restore_pw", "Enter password to restore"),
-      
       footer = tagList(
         modalButton("Cancel"),
         actionButton("confirm_restore", "Restore", class = "btn-danger")
       ),
-      
       easyClose = TRUE
     ))
     
@@ -3238,14 +3045,12 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$confirm_restore, {
-    # Wrong password: keep the dialog open so they can retry.
     if (!identical(input$restore_pw, REFRESH_PASSWORD)) {
       showNotification("Incorrect password.", type = "error", duration = 5)
       return()
     }
     
     v <- session$userData$pending_restore
-    
     req(v)
     
     restore_version(v)
@@ -3259,6 +3064,7 @@ server <- function(input, output, session) {
     showNotification(paste("Restored version", v, "and set it live."), type = "message")
   })
 }
+
 # ============================================================
 # RUN APP
 # ============================================================
