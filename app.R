@@ -144,6 +144,15 @@ parse_capacity_mw <- function(x) {
   }, numeric(1), USE.NAMES = FALSE)
 }
 
+# "$150-$180/kW" -> 165 | "$200" -> 200 | blank -> NA
+parse_price <- function(x) {
+  vapply(as.character(x), function(v) {
+    if (is.na(v)) return(NA_real_)
+    nums <- str_extract_all(str_replace_all(v, ",", ""), "[0-9]+\\.?[0-9]*")[[1]]
+    if (length(nums) == 0) NA_real_ else mean(as.numeric(nums))
+  }, numeric(1), USE.NAMES = FALSE)
+}
+
 # "Q2 2027" -> 2027-04-01
 quarter_to_date <- function(q) {
   m <- str_match(q, "^Q([1-4])\\s+(\\d{4})$")
@@ -861,8 +870,61 @@ $(function() {
     }, 200);
   });
 
+    // ---- Highlight window timeline (quarter strip) ----
+    var hlOn = false;
+    var tlDrag = false;
+    function tlBars() { return $('#hl_tl_wrap .tl-col'); }
+    function tlSet(idx) {
+      var $b = tlBars();
+      if (!$b.length) return;
+      idx = Math.max(0, Math.min(idx, $b.length - 1));
+      var mw = 0;
+      $b.each(function(i) {
+        var inside = i <= idx;
+        $(this).toggleClass('in', inside).toggleClass('edge', i === idx)
+               .attr('aria-pressed', i === idx ? 'true' : 'false');
+        if (inside) mw += parseFloat($(this).attr('data-mw')) || 0;
+      });
+      var q = $b.eq(idx).attr('data-q');
+      $('#hl_tl_read').html('Through <b>' + q + '</b> &middot; ' +
+        Math.round(mw).toLocaleString() + ' MW arriving');
+      $('#hl_tl_wrap').attr('data-idx', idx);
+      Shiny.setInputValue('hl_through', q);
+    }
+    function tlInit() {
+      var $w = $('#hl_tl_wrap');
+      if (!$w.length) return;
+      $w.toggleClass('is-on', hlOn);
+      tlSet(parseInt($w.attr('data-default'), 10) || 0);
+    }
+    $(document).on('shiny:value', function(e) {
+      if (e.name === 'hl_timeline') setTimeout(tlInit, 60);
+    });
+    $(document).on('pointerdown', '#hl_tl_wrap .tl-col', function() {
+      tlDrag = true;
+      tlSet($(this).index());
+    });
+    $(document).on('pointerenter', '#hl_tl_wrap .tl-col', function() {
+      if (tlDrag) tlSet($(this).index());
+    });
+    $(document).on('pointerup pointercancel', function() { tlDrag = false; });
+    $(document).on('click', '#hl_tl_wrap .tl-col', function() {
+      tlSet($(this).index());
+    });
+    $(document).on('keydown', '#hl_tl_wrap .tl-col', function(e) {
+      var i = $(this).index();
+      if (e.key === 'ArrowRight') { e.preventDefault(); tlSet(i + 1); tlBars().eq(Math.min(i + 1, tlBars().length - 1)).focus(); }
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); tlSet(i - 1); tlBars().eq(Math.max(i - 1, 0)).focus(); }
+    });
+    $(document).on('click', '#hl_tl_wrap .tl-chip', function() {
+      var n = parseInt($(this).attr('data-n'), 10);
+      tlSet(n >= 99 ? tlBars().length - 1 : n - 1);
+    });
+
     // Highlight button: off <-> on
    Shiny.addCustomMessageHandler('hl_state', function(on) {
+    hlOn = on;
+    $('#hl_tl_wrap').toggleClass('is-on', on);
     $('#highlight_toggle')
       .toggleClass('is-on', on)
       .attr('aria-pressed', on ? 'true' : 'false')
@@ -1518,6 +1580,67 @@ table.dataTable tbody tr:hover td { background-color: #17212F !important; }
 }
 )---"
 
+# ---------- Find Capacity tab ----------
+FIND_CSS <- r"---(
+.fc-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:16px; }
+.fc-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px 18px; position:relative; overflow:hidden; }
+.fc-card.rank-1 { border-color:var(--blue); box-shadow:0 0 0 1px rgba(59,130,246,.4), 0 12px 28px rgba(0,0,0,.35); }
+.fc-rank { font-size:11px; font-weight:700; letter-spacing:.08em; color:var(--blue-2); }
+.fc-name { font-size:16px; font-weight:700; color:#F8FAFC; margin-top:2px; }
+.fc-sub  { font-size:12.5px; color:var(--ink-3); }
+.fc-score { display:flex; align-items:center; gap:10px; margin:12px 0 8px; }
+.fc-bar { flex:1; height:8px; border-radius:99px; background:#1E293B; overflow:hidden; }
+.fc-bar > span { display:block; height:100%; border-radius:99px; background:linear-gradient(90deg,#60A5FA,#3B82F6); }
+.fc-pct { font-weight:750; font-size:20px; color:#F8FAFC; font-variant-numeric:tabular-nums; }
+.fc-why { font-size:12.5px; color:var(--ink-2); line-height:1.5; }
+.fc-gap { color:#FBBF24; }
+.fc-tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px; border:1px solid var(--line-2); color:var(--ink-2); margin-right:6px; }
+.fc-summary { padding:14px 18px; border-radius:12px; background:var(--panel-2); border:1px solid var(--line); margin-bottom:16px; font-size:14px; }
+.fc-summary b { color:var(--blue-2); }
+)---"
+
+# ---------- Highlight window timeline ----------
+TIMELINE_CSS <- r"---(
+.hl-tl {
+  margin-top: 10px; padding: 12px 12px 10px; border-radius: 14px;
+  border: 1px solid var(--line); background: var(--panel-2); opacity: .62;
+  transition: opacity .25s ease, border-color .25s ease, box-shadow .25s ease;
+}
+.hl-tl.is-on {
+  opacity: 1; border-color: rgba(245,158,11,.45);
+  box-shadow: 0 0 0 1px rgba(245,158,11,.18), 0 8px 22px rgba(245,158,11,.10);
+}
+.tl-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.tl-title { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.tl-chips { display: flex; gap: 4px; }
+.tl-chip {
+  border: 1px solid var(--line-2); background: transparent; color: var(--ink-2);
+  font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; cursor: pointer;
+  transition: border-color .15s ease, color .15s ease;
+}
+.tl-chip:hover { border-color: var(--amber); color: #FCD34D; }
+.tl-strip { display: flex; gap: 3px; align-items: stretch; height: 92px; user-select: none; -webkit-user-select: none; }
+.tl-col {
+  flex: 1 1 0; min-width: 0; padding: 0; border: 0; background: transparent;
+  display: flex; flex-direction: column; align-items: stretch; cursor: pointer; color: var(--ink-3);
+}
+.tl-bar { flex: 1; display: flex; align-items: flex-end; border-radius: 5px; background: rgba(148,163,184,.07); overflow: hidden; }
+.tl-fill { width: 100%; border-radius: 4px 4px 0 0; background: #243247; transition: background .2s ease, filter .2s ease; }
+.tl-col.in .tl-bar { background: rgba(59,130,246,.10); }
+.tl-col.in .tl-fill { background: linear-gradient(180deg, #93C5FD, #3B82F6); }
+.hl-tl.is-on .tl-col.in .tl-bar { background: rgba(245,158,11,.12); }
+.hl-tl.is-on .tl-col.in .tl-fill { background: linear-gradient(180deg, #FCD34D, #F59E0B); }
+.tl-col:hover .tl-fill { filter: brightness(1.2); }
+.tl-col.edge .tl-fill { filter: brightness(1.3); }
+.tl-col.edge .tl-q { color: #F8FAFC; }
+.tl-col:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 1px; border-radius: 5px; }
+.tl-q { font-size: 9.5px; font-weight: 700; margin-top: 4px; line-height: 1; text-align: center; }
+.tl-y { font-size: 9px; line-height: 1.4; height: 13px; color: var(--ink-3); text-align: center; }
+.tl-read { margin-top: 6px; font-size: 12px; color: var(--ink-2); text-align: center; }
+.tl-read b { color: #F8FAFC; }
+.hl-tl.is-on .tl-read b { color: #FCD34D; }
+)---"
+
 # ============================================================
 # UI
 # ============================================================
@@ -1557,6 +1680,8 @@ ui <- page_sidebar(
   
   tags$head(
     tags$style(HTML(APP_CSS)),
+    tags$style(HTML(FIND_CSS)),
+    tags$style(HTML(TIMELINE_CSS)),
     tags$script(HTML(APP_JS))
   ),
   
@@ -1572,7 +1697,7 @@ ui <- page_sidebar(
     
     # ---------------- Search ----------------
     conditionalPanel(
-      condition = "input.main_tabs != 'Version History'",
+      condition = "input.main_tabs == 'Data Centers' || input.main_tabs == 'Upcoming Capacity'",
       
       div(
         class = "sb-search",
@@ -1647,8 +1772,10 @@ ui <- page_sidebar(
         ),
         class = "hl-btn w-100 mt-3",
         `aria-pressed` = "false",
-        title = "Highlight sites with capacity arriving in the next 4 quarters"
-      )
+        title = "Highlight sites with upcoming capacity inside the chosen window"
+      ),
+      
+      uiOutput("hl_timeline")
     ),
     
     # ---------------- Upcoming Capacity filters ----------------
@@ -1787,6 +1914,73 @@ ui <- page_sidebar(
             "Download filtered results (CSV)",
             class = "btn-outline-primary btn-sm"
           )
+        )
+      )
+    ),
+    
+    # --------------------------------------------------------
+    # FIND CAPACITY
+    # --------------------------------------------------------
+    nav_panel(
+      "Find Capacity",
+      
+      card(
+        card_title("bullseye", "What do you need?",
+                   "Only sites with upcoming capacity are shown - the rest are at capacity"),
+        layout_columns(
+          col_widths = c(4, 2, 2, 4),
+          div(
+            div(class = "sb-section-label", "MW needed (minimum \u2013 ideal)"),
+            range_slider("fc_need", 0, 100, c(10, 50), step = 1)
+          ),
+          selectInput("fc_when", "Needed by", choices = QUARTER_COLS, selected = "Q4 2027"),
+          div(
+            div(class = "sb-section-label", "Scope"),
+            div(class = "seg-toggle",
+                radioButtons("fc_scope", NULL,
+                             choices = c("US" = "us", "Global" = "global"),
+                             selected = "global", inline = TRUE))
+          ),
+          div(
+            conditionalPanel(
+              condition = "input.fc_scope == 'us'",
+              selectizeInput("fc_state", "State", choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All states",
+                                            plugins = list("remove_button")))
+            ),
+            conditionalPanel(
+              condition = "input.fc_scope == 'global'",
+              selectizeInput("fc_country", "Country", choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All countries",
+                                            plugins = list("remove_button")))
+            )
+          )
+        ),
+        layout_columns(
+          col_widths = c(3, 3, 3, 3),
+          numericInput("fc_price", "Max $/kW (optional)", value = NA, min = 0),
+          numericInput("fc_pue", "Max PUE (optional)", value = NA, min = 1, step = 0.05),
+          selectInput("fc_sort", "Sort by",
+                      c("Best match", "Most MW", "Lowest price")),
+          div(class = "pt-4",
+              checkboxInput("fc_near", "Include near misses", value = TRUE))
+        )
+      ),
+      
+      uiOutput("fc_summary"),
+      uiOutput("fc_cards"),
+      
+      layout_columns(
+        col_widths = c(7, 5),
+        card(
+          card_title("list", "All matches",
+                     "Capacity arriving by your deadline, per site"),
+          DTOutput("fc_table")
+        ),
+        card(
+          full_screen = TRUE,
+          card_title("map-location-dot", "Where they are"),
+          leafletOutput("fc_map", height = 420)
         )
       )
     ),
@@ -2107,6 +2301,8 @@ server <- function(input, output, session) {
   # ----------------------------------------------------------
   
   output$sb_summary <- renderUI({
+    if (identical(input$main_tabs, "Find Capacity")) return(NULL)
+    
     if (identical(input$main_tabs, "Upcoming Capacity")) {
       n <- nrow(filtered_pipeline())
       total <- nrow(raw_pipeline())
@@ -2366,28 +2562,100 @@ server <- function(input, output, session) {
   # "Coming soon" highlight logic
   # ----------------------------------------------------------
   
+  # The highlight window runs from the current quarter through the quarter
+  # picked on the timeline strip (input$hl_through, e.g. "Q4 2027").
+  hl_end <- reactive({
+    today_q <- as.Date(cut(Sys.Date(), "quarter"))
+    q <- input$hl_through
+    d <- if (is.null(q)) as.Date(NA) else quarter_to_date(q)
+    if (is.na(d)) d <- seq(today_q, by = "3 months", length.out = 8)[8]
+    d
+  })
+  
+  hl_label <- reactive({
+    q <- input$hl_through
+    if (is.null(q)) "within 8 quarters" else paste("through", q)
+  })
+  
   upcoming_soon_keys <- reactive({
     pl <- raw_pipeline()
     
     if (nrow(pl) == 0) return(character(0))
     
     today_q <- as.Date(cut(Sys.Date(), "quarter"))
-    
-    soon_quarters <- pl %>%
-      filter(Quarter_Date >= today_q) %>%
-      distinct(Quarter, Quarter_Date) %>%
-      arrange(Quarter_Date) %>%
-      slice_head(n = 4) %>%
-      pull(Quarter)
+    end_q <- hl_end()
     
     pl %>%
-      filter(Quarter %in% soon_quarters) %>%
+      filter(!is.na(Quarter_Date), Quarter_Date >= today_q, Quarter_Date <= end_q) %>%
       mutate(key = paste(Operator, City_clean, State, Country, sep = "|")) %>%
       pull(key) %>%
       unique()
   })
   
-  # Count of sites in view that are coming online in the next 4 quarters
+  # Timeline strip: one bar per quarter from now to the last quarter in the data.
+  # Built from the data, so it never needs manual updating. Clicking/dragging is
+  # handled in JavaScript (no re-render), which reports the choice as input$hl_through.
+  output$hl_timeline <- renderUI({
+    pl <- raw_pipeline() %>% filter(!is.na(Quarter_Date))
+    if (nrow(pl) == 0) return(NULL)
+    
+    today_q <- as.Date(cut(Sys.Date(), "quarter"))
+    last_q <- max(pl$Quarter_Date, na.rm = TRUE)
+    if (last_q < today_q) return(NULL)
+    
+    qs <- seq(today_q, last_q, by = "3 months")
+    q_lab <- function(d) {
+      paste0("Q", (as.integer(format(d, "%m")) - 1) %/% 3 + 1, " ", format(d, "%Y"))
+    }
+    
+    q_df <- tibble(Quarter_Date = qs, Quarter = q_lab(qs)) %>%
+      left_join(
+        pl %>%
+          group_by(Quarter_Date) %>%
+          summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop"),
+        by = "Quarter_Date"
+      ) %>%
+      mutate(MW = coalesce(MW, 0))
+    
+    n <- nrow(q_df)
+    mx <- max(q_df$MW, 1)
+    default_idx <- min(7L, n - 1L)
+    
+    cols <- lapply(seq_len(n), function(i) {
+      r <- q_df[i, ]
+      qn <- substr(r$Quarter, 1, 2)
+      yr <- substr(r$Quarter, 6, 7)
+      show_year <- i == 1 || qn == "Q1"
+      
+      tags$button(
+        type = "button", class = "tl-col",
+        `data-q` = r$Quarter, `data-mw` = round(r$MW, 1),
+        title = paste0(r$Quarter, " \u00b7 ", fmt(r$MW), " MW arriving"),
+        `aria-label` = paste0("Highlight through ", r$Quarter, ", ", fmt(r$MW), " MW arriving"),
+        div(class = "tl-bar",
+            div(class = "tl-fill",
+                style = sprintf("height:%d%%", as.integer(max(6, round(100 * r$MW / mx)))))),
+        span(class = "tl-q", qn),
+        span(class = "tl-y", if (show_year) paste0("'", yr) else HTML("&nbsp;"))
+      )
+    })
+    
+    div(
+      id = "hl_tl_wrap", class = "hl-tl", `data-default` = default_idx,
+      div(
+        class = "tl-head",
+        span(class = "tl-title", "Highlight window"),
+        div(class = "tl-chips",
+            tags$button(type = "button", class = "tl-chip", `data-n` = "4", "4Q"),
+            tags$button(type = "button", class = "tl-chip", `data-n` = "8", "8Q"),
+            tags$button(type = "button", class = "tl-chip", `data-n` = "99", "All"))
+      ),
+      div(class = "tl-strip", cols),
+      div(id = "hl_tl_read", class = "tl-read", "")
+    )
+  })
+  
+  # Count of sites in view with capacity arriving inside the chosen window
   output$hl_count <- renderText({
     keys <- upcoming_soon_keys()
     n <- filtered() %>%
@@ -2619,7 +2887,7 @@ server <- function(input, output, session) {
       if (any_orange) paste0(
         "<div class='dc-legend-row'>",
         "<span class='dc-legend-dot' style='background:#F59E0B'></span>",
-        "Coming online in next 4 quarters</div>"
+        "Coming online ", hl_label(), "</div>"
       ) else "",
       
       "</div>"
@@ -3047,6 +3315,292 @@ server <- function(input, output, session) {
         write.csv(file, row.names = FALSE, na = "")
     }
   )
+  
+  # ==========================================================
+  # FIND CAPACITY
+  #   Only sites with upcoming capacity are offered: a site with
+  #   nothing in the pipeline is at capacity.
+  #   Upcoming MW is summed per site up to the deadline.
+  #   MW range: minimum = must-have, ideal = target.
+  # ==========================================================
+  
+  fc_slider_max <- reactiveVal(100)
+  sync_range("fc_need", fc_slider_max)
+  
+  observeEvent(raw_pipeline(), {
+    pl <- raw_pipeline()
+    
+    updateSelectizeInput(
+      session, "fc_state",
+      choices = sort(unique(pl$State[pl$is_us & !is.na(pl$State) & nzchar(pl$State)])),
+      server = TRUE
+    )
+    updateSelectizeInput(
+      session, "fc_country",
+      choices = sort(unique(na.omit(pl$Country))),
+      server = TRUE
+    )
+    
+    site_tot <- pl %>%
+      group_by(Operator, City_clean, State, Country) %>%
+      summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop")
+    
+    mx <- suppressWarnings(max(site_tot$MW, na.rm = TRUE))
+    if (!is.finite(mx)) mx <- 100
+    mx <- max(ceiling(mx), 1)
+    
+    fc_slider_max(mx)
+    updateSliderInput(session, "fc_need", max = mx,
+                      value = c(min(10, mx), min(50, mx)))
+  }, ignoreNULL = FALSE)
+  
+  fc_results <- reactive({
+    rng <- input$fc_need
+    req(length(rng) == 2, all(is.finite(rng)), input$fc_when)
+    
+    lo <- max(rng[1], 0.1)
+    hi <- max(rng[2], lo)
+    deadline <- quarter_to_date(input$fc_when)
+    
+    max_price <- input$fc_price
+    max_pue <- input$fc_pue
+    if (is.null(max_price) || !is.finite(max_price)) max_price <- NA_real_
+    if (is.null(max_pue) || !is.finite(max_pue)) max_pue <- NA_real_
+    
+    site_key <- function(d) paste(d$Operator, d$City_clean, d$State, d$Country, sep = "|")
+    
+    # Price / PUE live on the current-site rows
+    attrs <- raw_data() %>%
+      mutate(key = site_key(.), Price = parse_price(Price_per_kW)) %>%
+      group_by(key) %>%
+      summarise(
+        Price = Price[!is.na(Price)][1],
+        PUE = PUE[!is.na(PUE)][1],
+        A_Lat = Latitude[!is.na(Latitude)][1],
+        A_Lng = Longitude[!is.na(Longitude)][1],
+        .groups = "drop"
+      )
+    
+    df <- raw_pipeline() %>%
+      mutate(key = site_key(.)) %>%
+      filter(!is.na(Quarter_Date), Quarter_Date <= deadline, MW_available > 0)
+    
+    if (nrow(df) == 0) return(tibble())
+    
+    df <- df %>%
+      arrange(key, Quarter_Date) %>%
+      group_by(key, Operator, City_clean, State, Country) %>%
+      mutate(cum = cumsum(MW_available)) %>%
+      summarise(
+        MW = sum(MW_available, na.rm = TRUE),
+        Meets_in = Quarter[which(cum >= lo)[1]],
+        Meets_date = Quarter_Date[which(cum >= lo)[1]],
+        Last_Q = dplyr::last(Quarter),
+        Last_date = dplyr::last(Quarter_Date),
+        Lat = Latitude[!is.na(Latitude)][1],
+        Lng = Longitude[!is.na(Longitude)][1],
+        .groups = "drop"
+      ) %>%
+      left_join(attrs, by = "key") %>%
+      transmute(
+        Operator, Market = City_clean, State, Country, MW,
+        Delivers = coalesce(Meets_in, Last_Q),
+        Deliver_Date = coalesce(Meets_date, Last_date),
+        Price, PUE,
+        Latitude = coalesce(Lat, A_Lat), Longitude = coalesce(Lng, A_Lng)
+      )
+    
+    # ---- US / Global scope ----
+    if (identical(input$fc_scope, "us")) {
+      df <- df %>% filter(Country == "United States")
+      if (length(input$fc_state) > 0) df <- df %>% filter(State %in% input$fc_state)
+    } else if (length(input$fc_country) > 0) {
+      df <- df %>% filter(Country %in% input$fc_country)
+    }
+    
+    if (nrow(df) == 0) return(df)
+    
+    df <- df %>%
+      mutate(
+        meets = MW >= lo,
+        
+        # 55 pts MW fit: 40 for reaching the minimum, up to 55 for reaching the ideal
+        s_mw = case_when(
+          MW >= hi ~ 55,
+          MW >= lo ~ if (hi > lo) 40 + 15 * (MW - lo) / (hi - lo) else 55,
+          TRUE ~ 40 * MW / lo
+        ),
+        # 15 pts timing: earlier than the deadline is better (full marks at 1 year early)
+        s_time = if_else(
+          meets,
+          10 + 5 * pmin(pmax(as.numeric(deadline - Deliver_Date) / 365, 0), 1),
+          4
+        ),
+        # 20 pts price
+        s_price = case_when(
+          is.na(max_price) ~ 20,
+          is.na(Price) ~ 8,
+          Price <= max_price ~ 20,
+          TRUE ~ pmax(0, 20 * (1 - (Price - max_price) / max_price))
+        ),
+        # 10 pts PUE
+        s_pue = case_when(
+          is.na(max_pue) ~ 10,
+          is.na(PUE) ~ 4,
+          PUE <= max_pue ~ 10,
+          TRUE ~ 0
+        ),
+        Score = round(s_mw + s_time + s_price + s_pue),
+        
+        mw_txt = case_when(
+          MW >= hi ~ paste0("Delivers ", format(round(MW, 1), big.mark = ","),
+                            " MW by ", Delivers, " (ideal ", hi, " met)"),
+          meets ~ paste0("Delivers ", format(round(MW, 1), big.mark = ","),
+                         " MW by ", Delivers, " (minimum ", lo, " met)"),
+          TRUE ~ paste0("<span class='fc-gap'>", format(round(lo - MW, 1)),
+                        " MW short of the ", lo, " MW minimum</span>")
+        ),
+        price_txt = case_when(
+          is.na(max_price) ~ NA_character_,
+          is.na(Price) ~ "<span class='fc-gap'>no price on file</span>",
+          Price <= max_price ~ paste0("$", round(Price), "/kW within budget"),
+          TRUE ~ paste0("<span class='fc-gap'>$", round(Price), "/kW over budget</span>")
+        ),
+        pue_txt = case_when(
+          is.na(max_pue) ~ NA_character_,
+          is.na(PUE) ~ "<span class='fc-gap'>no PUE on file</span>",
+          PUE <= max_pue ~ paste0("PUE ", PUE, " OK"),
+          TRUE ~ paste0("<span class='fc-gap'>PUE ", PUE, " too high</span>")
+        ),
+        Why = paste0(
+          mw_txt,
+          if_else(is.na(price_txt), "", paste0(" &middot; ", price_txt)),
+          if_else(is.na(pue_txt), "", paste0(" &middot; ", pue_txt))
+        )
+      )
+    
+    if (!isTRUE(input$fc_near)) df <- df %>% filter(meets)
+    
+    switch(
+      input$fc_sort,
+      "Most MW" = df %>% arrange(desc(MW)),
+      "Lowest price" = df %>% arrange(is.na(Price), Price, desc(Score)),
+      df %>% arrange(desc(Score), desc(MW))
+    )
+  })
+  
+  output$fc_summary <- renderUI({
+    df <- fc_results()
+    rng <- input$fc_need
+    
+    if (nrow(df) == 0) {
+      return(div(
+        class = "fc-summary",
+        "No sites with upcoming capacity match. Try a later date, a lower minimum, ",
+        "a wider location, or turn on near misses."
+      ))
+    }
+    
+    full <- sum(df$meets)
+    best <- df[1, ]
+    
+    div(
+      class = "fc-summary",
+      tags$b(full), paste0(" of ", nrow(df), " sites with upcoming capacity can deliver at least "),
+      tags$b(rng[1]), paste0(" MW by ", input$fc_when, ". Top pick: "),
+      tags$b(paste0(best$Operator, " \u2014 ", best$Market)),
+      paste0(" (", best$Score, "% match).")
+    )
+  })
+  
+  output$fc_cards <- renderUI({
+    df <- fc_results()
+    if (nrow(df) == 0) return(NULL)
+    
+    top <- head(df, 3)
+    esc <- function(x) htmltools::htmlEscape(coalesce(as.character(x), ""))
+    
+    div(class = "fc-grid", lapply(seq_len(nrow(top)), function(i) {
+      r <- top[i, ]
+      loc <- c(esc(r$Market), esc(r$State))
+      loc <- loc[nzchar(loc)]
+      
+      div(
+        class = paste("fc-card", if (i == 1) "rank-1"),
+        div(class = "fc-rank", paste0("#", i, " MATCH")),
+        div(class = "fc-name", r$Operator),
+        div(class = "fc-sub", paste(loc, collapse = ", ")),
+        div(
+          class = "fc-score",
+          div(class = "fc-bar", span(style = sprintf("width:%d%%", as.integer(r$Score)))),
+          span(class = "fc-pct", paste0(r$Score, "%"))
+        ),
+        div(span(class = "fc-tag", paste("Delivers:", r$Delivers))),
+        div(class = "fc-why", style = "margin-top:8px", HTML(r$Why))
+      )
+    }))
+  })
+  
+  output$fc_table <- renderDT({
+    df <- fc_results()
+    
+    if (nrow(df) == 0) {
+      return(datatable(
+        tibble(Message = "No sites with upcoming capacity match this requirement."),
+        rownames = FALSE, options = list(dom = "t")
+      ))
+    }
+    
+    out <- df %>%
+      transmute(
+        Operator, Market, State, Country,
+        `MW by deadline` = round(MW, 1), Delivers,
+        `$/kW` = round(Price), PUE, `Match %` = Score
+      )
+    
+    datatable(
+      out, rownames = FALSE, class = "compact hover", selection = "none",
+      options = list(pageLength = 10, dom = "lfrtip")
+    ) %>%
+      add_color_bar(out, "Match %")
+  })
+  
+  output$fc_map <- renderLeaflet({
+    df <- fc_results()
+    if (nrow(df) > 0) df <- df %>% filter(!is.na(Latitude), !is.na(Longitude))
+    
+    m <- leaflet(options = leafletOptions(minZoom = 2, maxZoom = 18)) %>%
+      addTiles(
+        urlTemplate = CARTO_POSITRON_URL,
+        attribution = CARTO_ATTRIBUTION,
+        options = tileOptions(noWrap = TRUE)
+      ) %>%
+      setView(lng = -40, lat = 30, zoom = 2)
+    
+    if (nrow(df) == 0) return(m)
+    
+    pal <- colorNumeric(c("#DBEAFE", "#60A5FA", "#1D4ED8", "#0A1A4A"), domain = c(0, 100))
+    mw_max <- max(df$MW, 1, na.rm = TRUE)
+    
+    df <- df %>%
+      mutate(
+        r_px = 6 + 10 * sqrt(pmin(MW / mw_max, 1)),
+        pop = paste0(
+          "<b>", htmltools::htmlEscape(coalesce(Operator, "Unknown")), "</b><br>",
+          htmltools::htmlEscape(coalesce(Market, "")), "<br>",
+          Score, "% match<br>", Why
+        )
+      )
+    
+    m %>%
+      addCircleMarkers(
+        data = df, lng = ~Longitude, lat = ~Latitude,
+        radius = ~r_px, color = "#BFDBFE", weight = 1.5,
+        fillColor = ~pal(Score), fillOpacity = 0.85,
+        popup = ~pop
+      ) %>%
+      fit_points(df$Latitude, df$Longitude)
+  })
   
   # ==========================================================
   # REFRESH FROM DC.XLSX
