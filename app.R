@@ -1952,42 +1952,41 @@ server <- function(input, output, session) {
     value <- s$value
     type  <- s$type
     
-    if (identical(type, "State")) {
-      updateSelectizeInput(
-        session,
-        "state_filter",
-        selected = value
-      )
+    # ---- Upcoming Capacity tab: use the pipeline's own filters ----
+    if (identical(input$main_tabs, "Upcoming Capacity")) {
+      pl <- raw_pipeline()
+      us_states <- unique(pl$State[pl$is_us & !is.na(pl$State)])
       
-    } else if (identical(type, "Country")) {
-      updateSelectizeInput(
-        session,
-        "country_filter",
-        selected = value
-      )
-      
-    } else if (identical(type, "City")) {
-      updateSelectizeInput(
-        session,
-        "city_filter",
-        selected = value
-      )
-      
-    } else if (identical(type, "Operator")) {
-      updateSelectizeInput(
-        session,
-        "operator_filter",
-        selected = value
-      )
-      
+      if (identical(type, "State") && value %in% us_states) {
+        updateRadioButtons(session, "pipeline_scope", selected = "us")
+        updateSelectizeInput(session, "pipeline_state_filter", selected = value)
+        updateTextInput(session, "global_search", value = "")
+        
+      } else if (identical(type, "Country")) {
+        updateRadioButtons(session, "pipeline_scope", selected = "global")
+        updateSelectizeInput(session, "pipeline_country_filter", selected = value)
+        updateTextInput(session, "global_search", value = "")
+        
+      } else {
+        # Operator / City (and non-US states) have no dropdown on this tab,
+        # so keep the selection as an exact-phrase text search instead.
+        updateTextInput(session, "global_search", value = paste0('"', value, '"'))
+      }
+      return()
     }
     
-    # Clear the free-text search after selecting a structured suggestion.
-    updateTextInput(
-      session,
-      "global_search",
-      value = ""
-    )
+    # ---- Data Centers tab (unchanged) ----
+    if (identical(type, "State")) {
+      updateSelectizeInput(session, "state_filter", selected = value)
+    } else if (identical(type, "Country")) {
+      updateSelectizeInput(session, "country_filter", selected = value)
+    } else if (identical(type, "City")) {
+      updateSelectizeInput(session, "city_filter", selected = value)
+    } else if (identical(type, "Operator")) {
+      updateSelectizeInput(session, "operator_filter", selected = value)
+    }
+    
+    updateTextInput(session, "global_search", value = "")
   })
   
   # ----------------------------------------------------------
@@ -3029,7 +3028,9 @@ server <- function(input, output, session) {
         dom = "lfrtip",
         autoWidth = FALSE,
         order = list(list(7, "asc")),
-        columnDefs = list(list(visible = FALSE, targets = 7))
+        columnDefs = list(
+          list(visible = FALSE, targets = 7),
+          list(orderData = 7, targets = 5))
       )
     )
     
