@@ -1205,7 +1205,7 @@ a.pill:hover { border-color: var(--blue); color: #fff; }
 .kpi-yellow { --accent: #FACC15; }
 .kpi-blue   { --accent: #3B82F6; }
 .kpi-teal   { --accent: #2DD4BF; }
-.kpi-amber  { --accent: #F59E0B; }
+.kpi-violet  { --accent: #A855F7; }
 
 /* ---------- Sidebar ---------- */
 .bslib-sidebar-layout > .sidebar {
@@ -1755,7 +1755,7 @@ ui <- page_sidebar(
       layout_columns(
         col_widths = c(4, 4, 4),
         kpi("yellow", "bolt", "Upcoming capacity (MW est.)", "vb_pipeline_mw"),
-        kpi("amber", "clock", "Upcoming entries in view", "vb_pipeline_entries"),
+        kpi("violet", "clock", "Upcoming entries in view", "vb_pipeline_entries"),
         kpi("blue", "building", "Sites in view", "vb_pipeline_sites")
       ),
       
@@ -2296,17 +2296,22 @@ server <- function(input, output, session) {
   }, ignoreNULL = FALSE)
   
   # Year shortcut buttons
-  for (yr in 2026:2029) {
-    local({
-      y <- yr
-      observeEvent(input[[paste0("q_", y)]], {
-        updateSelectizeInput(
-          session, "quarter_filter",
-          selected = QUARTER_COLS[grepl(as.character(y), QUARTER_COLS, fixed = TRUE)]
-        )
-      })
+  lapply(2026:2029, function(y) {
+    observeEvent(input[[paste0("q_", y)]], {
+      year_qs  <- QUARTER_COLS[grepl(as.character(y), QUARTER_COLS, fixed = TRUE)]
+      selected <- input$quarter_filter
+      if (is.null(selected)) selected <- character(0)
+      
+      new_sel <- if (all(year_qs %in% selected)) {
+        setdiff(selected, year_qs)
+      } else {
+        union(selected, year_qs)
+      }
+      
+      updateSelectizeInput(session, "quarter_filter",
+                           selected = QUARTER_COLS[QUARTER_COLS %in% new_sel])
     })
-  }
+  })
   
   # ----------------------------------------------------------
   # "Coming soon" highlight logic
