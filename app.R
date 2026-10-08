@@ -1578,6 +1578,11 @@ table.dataTable tbody tr:hover td { background-color: #17212F !important; }
 .is-on .hl-title::after {
   content: " \2713"; color: #FCD34D;
 }
+
+/* ---------- Donut toggle (Country / City) ---------- */
+.seg-mini { margin-left: 12px; width: 150px; flex: none; }
+.seg-mini .shiny-input-container, .seg-mini .form-group { margin: 0 !important; width: 100% !important; }
+.seg-mini .form-check-label { padding: 4px 0; font-size: 12px; }
 )---"
 
 # ---------- Find Capacity tab ----------
@@ -1860,8 +1865,17 @@ ui <- page_sidebar(
           plotlyOutput("top_operators_chart", height = "330px")
         ),
         card(
-          card_title("globe", "Capacity by country", "Share of MW in view"),
-          plotlyOutput("country_share_chart", height = "330px")
+          card_header(
+            class = "dc-card-head",
+            span(class = "dc-card-ic", icon("globe")),
+            span(class = "dc-card-title", textOutput("donut_title", inline = TRUE)),
+            span(class = "dc-card-hint", "Share of MW in view"),
+            div(class = "seg-toggle seg-mini",
+                radioButtons("donut_by", NULL,
+                             choices = c("Country" = "country", "City" = "city"),
+                             selected = "country", inline = TRUE))
+          ),
+          plotlyOutput("share_chart", height = "330px")
         )
       ),
       
@@ -2445,6 +2459,7 @@ server <- function(input, output, session) {
   observeEvent(input$reset_filters, {
     updateRadioButtons(session, "scope", selected = "global")
     updateRadioButtons(session, "pipeline_scope", selected = "global")
+    updateRadioButtons(session, "donut_by", selected = "country")
     
     for (id in c("state_filter", "country_filter", "city_filter",
                  "operator_filter", "pipeline_country_filter",
@@ -2932,11 +2947,42 @@ server <- function(input, output, session) {
       )
   })
   
-  output$country_share_chart <- renderPlotly({
+  # ---- Capacity share donut: by country OR by city ----
+  
+  # TRUE when everything in view belongs to a single country
+  single_country <- reactive({
+    n_distinct(na.omit(filtered()$Country)) == 1
+  })
+  
+  # Auto-flip: one country in view -> city view; otherwise -> country view.
+  # Fires only when that state changes, so a manual toggle isn't overridden.
+  observeEvent(single_country(), {
+    updateRadioButtons(session, "donut_by",
+                       selected = if (single_country()) "city" else "country")
+  }, ignoreInit = FALSE)
+  
+  output$donut_title <- renderText({
+    if (identical(input$donut_by, "city")) "Capacity by city" else "Capacity by country"
+  })
+  
+  output$share_chart <- renderPlotly({
+    by_city <- identical(input$donut_by, "city")
+    
     df <- filtered() %>%
-      filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0) %>%
-      mutate(Country = coalesce(Country, "Unknown")) %>%
-      group_by(Country) %>%
+      filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0)
+    
+    df <- if (by_city) {
+      df %>% mutate(Label = case_when(
+        is.na(City_clean) ~ "Unknown",
+        is_us & !is.na(State) & State != "" ~ paste0(City_clean, ", ", State),
+        TRUE ~ City_clean
+      ))
+    } else {
+      df %>% mutate(Label = coalesce(Country, "Unknown"))
+    }
+    
+    df <- df %>%
+      group_by(Label) %>%
       summarise(MW = sum(Capacity_MW_est, na.rm = TRUE), .groups = "drop") %>%
       arrange(desc(MW))
     
@@ -2945,7 +2991,8 @@ server <- function(input, output, session) {
     if (nrow(df) > 7) {
       df <- bind_rows(
         df %>% slice_head(n = 7),
-        tibble(Country = "Other", MW = sum(df$MW[8:nrow(df)]))
+        tibble(Label = if (by_city) "Other cities" else "Other",
+               MW = sum(df$MW[8:nrow(df)]))
       )
     }
     
@@ -2953,7 +3000,7 @@ server <- function(input, output, session) {
               "#F59E0B", "#A78BFA", "#64748B")[seq_len(nrow(df))]
     
     plot_ly(
-      df, labels = ~Country, values = ~MW, type = "pie", hole = 0.62,
+      df, labels = ~Label, values = ~MW, type = "pie", hole = 0.62,
       sort = FALSE, direction = "clockwise",
       textinfo = "none",
       hovertemplate = "<b>%{label}</b><br>%{value:,.0f} MW (%{percent})<extra></extra>",
