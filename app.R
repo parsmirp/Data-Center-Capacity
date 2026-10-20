@@ -1,18 +1,39 @@
 # ============================================================
 # Data Center Capacity Dashboard
 #
-# MASTER DATA:   DC.xlsx
+# MASTER DATA:   DC_Inventory_Master_COMBINED_THANOS (9).xlsx
+#                on SharePoint (DataCenterCapacity > Documents >
+#                Glen and Jacob), synced to this Mac by OneDrive
+# APP COPY:      DC.xlsx  - a symlink in this folder that points to
+#                the synced master file (not a separate copy)
 # RUNTIME DATA:  dc_data.sqlite
 #
 # Workflow:
-# 1. Edit & save DC.xlsx
-# 2. Launch the app - it imports DC.xlsx automatically at startup
+# 1. Anyone edits the master workbook on SharePoint
+# 2. OneDrive syncs it to this Mac automatically (no download/rename)
+# 3. Launch the app - it imports DC.xlsx automatically at startup
 #    (only if the file changed since the last import)
-# 3. (Optional) "Refresh from DC.xlsx" in Version History if you
-#    edit DC.xlsx while the app is already running
+# 4. (Optional) "Refresh from DC.xlsx" in Version History if the
+#    master sheet changes while the app is already running
+# 5. Republish the app so the hosted version gets the new data
+#
+# If the master file is ever renamed on SharePoint, recreate the link
+# in Terminal:
+#   rm -f ~/Desktop/shiny/DC.xlsx
+#   ln -s "<full path to the new synced file>" ~/Desktop/shiny/DC.xlsx
 #
 # SQLite is the fast runtime database. Geocoding happens during
 # import and reuses cached coordinates.
+#
+# Data rules worth knowing:
+#   * Quarter columns are detected from the sheet headers
+#     (any column named like "Q3 2026"), so adding "Q1 2030"
+#     just works and quarters always sort by date.
+#   * Capacity text is read unit-aware: "1.2 GW" = 1,200 MW,
+#     "500 kW" = 0.5 MW, "Phase 1: 18 MW, Phase 2: 24 MW" = 42 MW,
+#     "20-40 MW" = 30 MW estimate with a 20-40 MW range.
+#   * Anything that cannot be read cleanly is listed under
+#     Version History > Data quality check.
 # ============================================================
 
 # ---------- Packages ----------
@@ -39,6 +60,11 @@ MASTER_FILE <- "DC.xlsx"
 # Leave as "" to hide the link.
 SHAREPOINT_URL <- ""
 
+# Bump this whenever the import/parsing logic changes. It is part of the
+# import signature, so the next launch re-imports DC.xlsx even if the file
+# itself has not changed.
+IMPORT_SCHEMA_VERSION <- "3"
+
 ## carto map api key
 CARTO_KEY <- Sys.getenv("CARTO_API_KEY")
 if (!nzchar(CARTO_KEY) && file.exists("carto_key.txt")) {
@@ -57,19 +83,15 @@ CARTO_ATTRIBUTION <- paste0(
 REFRESH_PASSWORD <- Sys.getenv("DC_REFRESH_PASSWORD", unset = "bytebt")
 
 # ---------- Quarter columns ----------
+# Any sheet column whose header looks like "Q3 2026" is an upcoming-capacity
+# column. There is no fixed list: the sheet decides.
 
-QUARTER_COLS <- c(
-  "Q3 2026", "Q4 2026",
-  "Q1 2027", "Q2 2027", "Q3 2027", "Q4 2027",
-  "Q1 2028", "Q2 2028", "Q3 2028", "Q4 2028",
-  "Q1 2029", "Q2 2029", "Q3 2029", "Q4 2029"
-)
+QUARTER_PATTERN <- "^Q[1-4] \\d{4}$"
 
 # ---------- Optional master-file columns ----------
 
 MASTER_OPTIONAL_COLS <- c(
   "Market", "Address", "City", "State/Province", "Region", "Capacity Upload date",
-  QUARTER_COLS,
   "Utility Rate ($/kWh)", "Price ($/kW)", "Cooling", "PUE",
   "Tax Incentives", "Deal Reg", "Notes", "Contacts"
 )
@@ -121,37 +143,16 @@ MANUAL_COORDS <- tribble(
 )
 
 # ============================================================
-# PARSING HELPERS
+# SMALL GENERAL HELPERS
 # ============================================================
-# "20-40 MW" -> 30 | "3 MW + 6 MW" -> 9 | "18 MW" -> 18 | blank -> NA
 
-parse_capacity_mw <- function(x) {
-  x <- as.character(x)
-  x <- str_replace_all(x, ",", "")
-  
-  vapply(x, function(val) {
-    if (is.na(val)) return(NA_real_)
-    
-    parts <- str_split(val, "\\+")[[1]]
-    part_vals <- vapply(parts, function(p) {
-      nums <- str_extract_all(p, "[0-9]+\\.?[0-9]*")[[1]]
-      if (length(nums) == 0) return(NA_real_)
-      mean(as.numeric(nums))
-    }, numeric(1))
-    
-    if (all(is.na(part_vals))) return(NA_real_)
-    sum(part_vals, na.rm = TRUE)
-  }, numeric(1), USE.NAMES = FALSE)
-}
+`%||%` <- function(a, b) if (is.null(a)) b else a
 
-# "$150-$180/kW" -> 165 | "$200" -> 200 | blank -> NA
-parse_price <- function(x) {
-  vapply(as.character(x), function(v) {
-    if (is.na(v)) return(NA_real_)
-    nums <- str_extract_all(str_replace_all(v, ",", ""), "[0-9]+\\.?[0-9]*")[[1]]
-    if (length(nums) == 0) NA_real_ else mean(as.numeric(nums))
-  }, numeric(1), USE.NAMES = FALSE)
-}
+esc_html <- function(x) htmltools::htmlEscape(enc2utf8(as.character(x)))
+
+# ============================================================
+# QUARTER HELPERS
+# ============================================================
 
 # "Q2 2027" -> 2027-04-01
 quarter_to_date <- function(q) {
@@ -165,6 +166,216 @@ quarter_to_date <- function(q) {
     NA_character_,
     sprintf("%04d-%02d-01", yr, month)
   ))
+}
+
+# 2027-04-01 -> "Q2 2027"
+quarter_label <- function(d) {
+  m <- as.integer(format(d, "%m"))
+  ifelse(is.na(d), NA_character_, paste0("Q", (m - 1L) %/% 3L + 1L, " ", format(d, "%Y")))
+}
+
+# First day of the quarter that contains `d` (today by default)
+current_quarter_start <- function(d = Sys.Date()) {
+  m <- as.integer(format(d, "%m"))
+  y <- as.integer(format(d, "%Y"))
+  as.Date(sprintf("%04d-%02d-01", y, (m - 1L) %/% 3L * 3L + 1L))
+}
+
+# ============================================================
+# MW FORMATTING HELPERS (estimate + min-max range text)
+# ============================================================
+
+fmt_mw <- function(x) {
+  ifelse(is.na(x), "\u2013", prettyNum(round(x, 1), big.mark = ","))
+}
+
+# "20\u201340" when there is a real range, "" when min == max or unknown
+mw_span_txt <- function(lo, hi) {
+  ifelse(
+    is.na(lo) | is.na(hi) | abs(hi - lo) < 0.05,
+    "",
+    paste0(fmt_mw(lo), "\u2013", fmt_mw(hi))
+  )
+}
+
+# "30 MW (range 20\u201340 MW)" or "18 MW"
+mw_range_txt <- function(est, lo, hi) {
+  span <- mw_span_txt(lo, hi)
+  ifelse(
+    is.na(est),
+    "No data",
+    paste0(fmt_mw(est), " MW", ifelse(nzchar(span), paste0(" (range ", span, " MW)"), ""))
+  )
+}
+
+# ============================================================
+# CAPACITY PARSING
+# ============================================================
+# Reads free text such as:
+#   "20-40 MW"                          -> min 20, max 40, est 30
+#   "3 MW + 6 MW"                       -> 9
+#   "Phase 1: 18 MW, Phase 2: 24 MW"    -> 42   (phase numbers are not MW)
+#   "1.2 GW"                            -> 1,200
+#   "500 kW"                            -> 0.5
+#   "1,200 MW"                          -> 1,200
+#   "20-40"  (no unit)                  -> 30   (the column is "MW")
+# Every value is returned as min / max / estimate (midpoint) plus a
+# plain-English flag when the text could not be read cleanly.
+
+CAP_UNIT <- "(?:gigawatts?|megawatts?|kilowatts?|mwe|mva|gw|mw|kw)"
+CAP_NUM  <- "\\d+(?:\\.\\d+)?"
+
+# number [unit] [ - | to  number [unit] ]
+CAP_TOKEN_RE <- regex(
+  paste0(
+    "(", CAP_NUM, ")\\s*(", CAP_UNIT, "\\b)?",
+    "(?:\\s*(?:-|\u2013|\u2014|\\bto\\b)\\s*(", CAP_NUM, ")\\s*(", CAP_UNIT, "\\b)?)?"
+  ),
+  ignore_case = TRUE
+)
+
+# "Phase 2", "Building 3", "Q3" ... labels whose numbers are not capacity
+CAP_LABEL_RE <- regex(
+  paste0(
+    "\\b(?:phase|stage|building|bldg|block|hall|module|tranche|campus|site|unit|pod|suite|floor|level|q)",
+    "\\s*#?\\s*\\d+(?:\\s*(?:&|/|and)\\s*\\d+|-\\d+)?"
+  ),
+  ignore_case = TRUE
+)
+
+CAP_NOISE_RE <- regex(
+  "\\b(?:approx(?:imately)?|est(?:imated)?|about|circa|around|roughly)\\b\\.?",
+  ignore_case = TRUE
+)
+
+# Wording that makes the number unreliable on its own
+CAP_AMBIG_STRONG_RE <- regex(
+  "\\b(?:or|up to|at least|at most|min|max|minimum|maximum)\\b|\\d\\s*[x\u00d7]\\s*\\d",
+  ignore_case = TRUE
+)
+# Wording that may mean numbers overlap (only matters with 2+ numbers)
+CAP_AMBIG_MULTI_RE <- regex(
+  "\\b(?:incl\\w*|of which|total|subtotal)\\b|\\([^)]*\\d",
+  ignore_case = TRUE
+)
+
+cap_unit_factor <- function(u) {
+  u <- str_to_lower(u)
+  case_when(
+    is.na(u) ~ 1,
+    str_starts(u, "g") ~ 1000,
+    str_starts(u, "k") ~ 0.001,
+    TRUE ~ 1
+  )
+}
+
+parse_capacity_one <- function(val) {
+  none <- list(min = NA_real_, max = NA_real_, est = NA_real_, flag = NA_character_)
+  
+  if (length(val) != 1 || is.na(val)) return(none)
+  s <- str_squish(as.character(val))
+  if (!nzchar(s)) return(none)
+  
+  # 1,200 -> 1200 (thousands separator only), then drop labels and filler words
+  s <- str_replace_all(s, "(?<=\\d),(?=\\d{3}(?!\\d))", "")
+  s <- str_replace_all(s, CAP_LABEL_RE, " ")
+  s <- str_replace_all(s, CAP_NOISE_RE, " ")
+  s <- str_squish(s)
+  
+  no_number <- function() {
+    r <- none
+    r$flag <- "No number found"
+    r
+  }
+  
+  m <- str_match_all(s, CAP_TOKEN_RE)[[1]]
+  if (nrow(m) == 0) return(no_number())
+  
+  blank_to_na <- function(x) {
+    x[!is.na(x) & !nzchar(x)] <- NA_character_
+    x
+  }
+  
+  lo_v <- as.numeric(m[, 2])
+  hi_v <- suppressWarnings(as.numeric(m[, 4]))
+  hi_v <- ifelse(is.na(hi_v), lo_v, hi_v)
+  u1 <- blank_to_na(m[, 3])
+  u2 <- blank_to_na(m[, 5])
+  
+  has_unit <- !is.na(u1) | !is.na(u2)
+  
+  # A bare 4-digit number between 1990 and 2100 is a year, not capacity
+  is_year <- !has_unit &
+    lo_v == round(lo_v) & hi_v == round(hi_v) &
+    lo_v >= 1990 & hi_v <= 2100
+  keep <- !is_year
+  
+  if (!any(keep)) return(no_number())
+  
+  flags <- character(0)
+  
+  if (any(keep & has_unit)) {
+    # Explicit units win. Stray unit-less numbers (e.g. "18 MW + 6") are
+    # ignored rather than guessed, and flagged.
+    dropped <- keep & !has_unit
+    if (any(dropped)) {
+      flags <- c(flags, paste0(
+        "Ignored number(s) without a unit: ", paste(lo_v[dropped], collapse = ", ")
+      ))
+    }
+    keep <- keep & has_unit
+  } else if (str_detect(s, "[A-Za-z]")) {
+    flags <- c(flags, "No unit stated - assumed MW")
+  }
+  
+  lo_mw <- lo_v * cap_unit_factor(coalesce(u1, u2))
+  hi_mw <- hi_v * cap_unit_factor(coalesce(u2, u1))
+  tok_min <- pmin(lo_mw, hi_mw)[keep]
+  tok_max <- pmax(lo_mw, hi_mw)[keep]
+  n_tok <- sum(keep)
+  
+  strong <- str_extract(s, CAP_AMBIG_STRONG_RE)
+  if (!is.na(strong)) {
+    flags <- c(flags, paste0("Ambiguous wording ('", strong, "') - check the value"))
+  } else if (n_tok > 1 && !is.na(str_extract(s, CAP_AMBIG_MULTI_RE))) {
+    flags <- c(flags, "Numbers may overlap (total / incl. / bracketed) - check the value")
+  }
+  
+  mn <- sum(tok_min)
+  mx <- sum(tok_max)
+  
+  if (mx >= 5000) flags <- c(flags, "Very large (5,000+ MW) - check the units")
+  
+  list(
+    min = mn,
+    max = mx,
+    est = (mn + mx) / 2,
+    flag = if (length(flags) > 0) paste(flags, collapse = "; ") else NA_character_
+  )
+}
+
+# Vectorised version: one row per input value
+parse_capacity_detail <- function(x) {
+  res <- lapply(as.character(x), parse_capacity_one)
+  
+  tibble(
+    MW_min = vapply(res, function(r) r$min, numeric(1)),
+    MW_max = vapply(res, function(r) r$max, numeric(1)),
+    MW_est = vapply(res, function(r) r$est, numeric(1)),
+    Flag   = vapply(res, function(r) r$flag, character(1))
+  )
+}
+
+# Kept for convenience: just the estimate
+parse_capacity_mw <- function(x) parse_capacity_detail(x)$MW_est
+
+# "$150-$180/kW" -> 165 | "$200" -> 200 | blank -> NA
+parse_price <- function(x) {
+  vapply(as.character(x), function(v) {
+    if (is.na(v)) return(NA_real_)
+    nums <- str_extract_all(str_replace_all(v, ",", ""), "[0-9]+\\.?[0-9]*")[[1]]
+    if (length(nums) == 0) NA_real_ else mean(as.numeric(nums))
+  }, numeric(1), USE.NAMES = FALSE)
 }
 
 # ============================================================
@@ -231,7 +442,9 @@ initialize_database <- function() {
       tibble(
         Operator = character(), City = character(), State = character(),
         Country = character(), Region = character(), Capacity = character(),
-        Capacity_MW_est = double(), Utility_Rate = character(),
+        Capacity_MW_est = double(), Capacity_MW_min = double(),
+        Capacity_MW_max = double(), Capacity_Flag = character(),
+        Utility_Rate = character(),
         Price_per_kW = character(), Cooling = character(), PUE = double(),
         Tax_Incentives = character(), Deal_Reg = character(),
         Notes = character(), Contacts = character(), is_us = logical(),
@@ -248,7 +461,8 @@ initialize_database <- function() {
         Operator = character(), City_clean = character(), State = character(),
         Country = character(), Region = character(), is_us = logical(),
         Quarter = character(), Quarter_Date = character(),
-        MW_available = double(), Latitude = double(), Longitude = double()
+        MW_available = double(), MW_min = double(), MW_max = double(),
+        Latitude = double(), Longitude = double()
       ),
       overwrite = TRUE
     )
@@ -270,7 +484,13 @@ initialize_database()
 # ============================================================
 
 clean_master_df <- function(raw) {
-  names(raw) <- str_trim(names(raw))
+  names(raw) <- str_squish(names(raw))
+  
+  # ---- Quarter columns come from the sheet itself, sorted by date ----
+  q_idx <- str_detect(names(raw), regex(QUARTER_PATTERN, ignore_case = TRUE))
+  names(raw)[q_idx] <- str_to_upper(names(raw)[q_idx])
+  quarter_cols <- names(raw)[q_idx]
+  quarter_cols <- quarter_cols[order(quarter_to_date(quarter_cols))]
   
   required_cols <- c("DC Operator", "Country", "Total Capacity (MW)")
   missing_req <- setdiff(required_cols, names(raw))
@@ -290,6 +510,9 @@ clean_master_df <- function(raw) {
     mutate(across(everything(), ~ na_if(str_trim(as.character(.x)), ""))) %>%
     mutate(row_id = row_number())
   
+  # ---- Current capacity: min / max / estimate + review flag ----
+  cap <- parse_capacity_detail(raw$`Total Capacity (MW)`)
+  
   # Market = what users see/filter by. City = real city, used only for geocoding.
   current <- raw %>%
     transmute(
@@ -303,7 +526,10 @@ clean_master_df <- function(raw) {
       Country = Country,
       Region = Region,
       Capacity = `Total Capacity (MW)`,
-      Capacity_MW_est = parse_capacity_mw(`Total Capacity (MW)`),
+      Capacity_MW_est = cap$MW_est,
+      Capacity_MW_min = cap$MW_min,
+      Capacity_MW_max = cap$MW_max,
+      Capacity_Flag = cap$Flag,
       Utility_Rate = `Utility Rate ($/kWh)`,
       Price_per_kW = `Price ($/kW)`,
       Cooling = Cooling,
@@ -316,38 +542,88 @@ clean_master_df <- function(raw) {
       City_clean = coalesce(Market, City, paste0(Country, " (no city provided)"))
     )
   
-  pipeline_meta <- raw %>%
-    transmute(
-      row_id,
-      Operator = `DC Operator`,
-      City = City,
-      State = `State/Province`,
-      Country = Country,
-      Region = Region,
-      is_us = Country == "United States",
-      City_clean = coalesce(Market, City, paste0(Country, " (no city provided)"))
-    )
+  flags_current <- tibble(
+    Excel_Row = raw$row_id + 1L,
+    Operator = raw$`DC Operator`,
+    Market = coalesce(raw$Market, raw$City, raw$Country),
+    Field = "Total Capacity (MW)",
+    Value_in_sheet = raw$`Total Capacity (MW)`,
+    Read_as = mw_range_txt(cap$MW_est, cap$MW_min, cap$MW_max),
+    Issue = cap$Flag
+  ) %>%
+    filter(!is.na(Issue))
   
-  pipeline_quarters <- raw %>% select(all_of(QUARTER_COLS))
+  # ---- Upcoming capacity (one row per site x quarter) ----
+  empty_pipeline <- tibble(
+    row_id = integer(), Operator = character(), City_clean = character(),
+    State = character(), Country = character(), Region = character(),
+    is_us = logical(), Quarter = character(), Quarter_Date = as.Date(character()),
+    MW_available = double(), MW_min = double(), MW_max = double()
+  )
   
-  pipeline <- bind_cols(pipeline_meta, pipeline_quarters) %>%
-    pivot_longer(
-      cols = all_of(QUARTER_COLS),
-      names_to = "Quarter",
-      values_to = "raw_val"
-    ) %>%
-    filter(!is.na(raw_val)) %>%
-    mutate(
-      MW_available = parse_capacity_mw(raw_val),
-      Quarter_Date = quarter_to_date(Quarter)
-    ) %>%
-    filter(!is.na(MW_available)) %>%
-    select(
-      row_id, Operator, City_clean, State, Country, Region,
-      is_us, Quarter, Quarter_Date, MW_available
-    )
+  pipeline <- empty_pipeline
+  flags_pipeline <- tibble(
+    Excel_Row = integer(), Operator = character(), Market = character(),
+    Field = character(), Value_in_sheet = character(),
+    Read_as = character(), Issue = character()
+  )
   
-  list(current = current, pipeline = pipeline)
+  if (length(quarter_cols) > 0) {
+    pipeline_meta <- raw %>%
+      transmute(
+        row_id,
+        Operator = `DC Operator`,
+        City = City,
+        State = `State/Province`,
+        Country = Country,
+        Region = Region,
+        is_us = Country == "United States",
+        City_clean = coalesce(Market, City, paste0(Country, " (no city provided)"))
+      )
+    
+    pipeline_cells <- bind_cols(pipeline_meta, raw %>% select(all_of(quarter_cols))) %>%
+      pivot_longer(
+        cols = all_of(quarter_cols),
+        names_to = "Quarter",
+        values_to = "raw_val"
+      ) %>%
+      filter(!is.na(raw_val))
+    
+    pq <- parse_capacity_detail(pipeline_cells$raw_val)
+    
+    pipeline_cells <- pipeline_cells %>%
+      mutate(
+        MW_available = pq$MW_est,
+        MW_min = pq$MW_min,
+        MW_max = pq$MW_max,
+        Cap_Flag = pq$Flag,
+        Quarter_Date = quarter_to_date(Quarter)
+      )
+    
+    flags_pipeline <- pipeline_cells %>%
+      filter(!is.na(Cap_Flag)) %>%
+      transmute(
+        Excel_Row = row_id + 1L,
+        Operator,
+        Market = City_clean,
+        Field = Quarter,
+        Value_in_sheet = raw_val,
+        Read_as = mw_range_txt(MW_available, MW_min, MW_max),
+        Issue = Cap_Flag
+      )
+    
+    pipeline <- pipeline_cells %>%
+      filter(!is.na(MW_available)) %>%
+      select(
+        row_id, Operator, City_clean, State, Country, Region,
+        is_us, Quarter, Quarter_Date, MW_available, MW_min, MW_max
+      )
+  }
+  
+  flags <- bind_rows(flags_current, flags_pipeline) %>%
+    arrange(Excel_Row)
+  
+  list(current = current, pipeline = pipeline, flags = flags, quarters = quarter_cols)
 }
 
 # ============================================================
@@ -460,46 +736,6 @@ geocode_current <- function(current_df, existing_current = NULL, progress_fn = N
 }
 
 # ============================================================
-# PIPELINE COORDINATES
-# ============================================================
-
-attach_pipeline_coordinates <- function(pipeline_df, current_df) {
-  if (nrow(pipeline_df) == 0) {
-    pipeline_df$Latitude <- numeric(0)
-    pipeline_df$Longitude <- numeric(0)
-    return(pipeline_df)
-  }
-  
-  if (!"Latitude" %in% names(pipeline_df)) pipeline_df$Latitude <- NA_real_
-  if (!"Longitude" %in% names(pipeline_df)) pipeline_df$Longitude <- NA_real_
-  
-  coords <- current_df %>%
-    select(City_clean, State, Country, Latitude, Longitude) %>%
-    filter(!is.na(Latitude), !is.na(Longitude)) %>%
-    distinct(City_clean, State, Country, .keep_all = TRUE) %>%
-    rename(Current_Latitude = Latitude, Current_Longitude = Longitude)
-  
-  pipeline_df %>%
-    left_join(coords, by = c("City_clean", "State", "Country")) %>%
-    left_join(
-      country_centroids %>%
-        rename(Country_Latitude = Latitude, Country_Longitude = Longitude),
-      by = "Country"
-    ) %>%
-    mutate(
-      Latitude = coalesce(
-        Latitude, Current_Latitude,
-        if_else(str_ends(City_clean, fixed(" (no city provided)")), Country_Latitude, NA_real_)
-      ),
-      Longitude = coalesce(
-        Longitude, Current_Longitude,
-        if_else(str_ends(City_clean, fixed(" (no city provided)")), Country_Longitude, NA_real_)
-      )
-    ) %>%
-    select(-Current_Latitude, -Current_Longitude, -Country_Latitude, -Country_Longitude)
-}
-
-# ============================================================
 # DATABASE READ FUNCTIONS
 # ============================================================
 
@@ -516,6 +752,8 @@ load_current <- function() {
     City = NA_character_, Geo_City = NA_character_,
     State = NA_character_, Country = NA_character_, Region = NA_character_,
     Capacity = NA_character_, Capacity_MW_est = NA_real_,
+    Capacity_MW_min = NA_real_, Capacity_MW_max = NA_real_,
+    Capacity_Flag = NA_character_,
     Utility_Rate = NA_character_, Price_per_kW = NA_character_,
     Cooling = NA_character_, PUE = NA_real_, Tax_Incentives = NA_character_,
     Deal_Reg = NA_character_, Notes = NA_character_, Contacts = NA_character_,
@@ -526,26 +764,51 @@ load_current <- function() {
     if (!col %in% names(df)) df[[col]] <- defaults[[col]]
   }
   
+  # Older snapshots have no min/max: fall back to the single estimate
+  df$Capacity_MW_min <- coalesce(df$Capacity_MW_min, df$Capacity_MW_est)
+  df$Capacity_MW_max <- coalesce(df$Capacity_MW_max, df$Capacity_MW_est)
+  
   df
+}
+
+empty_pipeline_tbl <- function() {
+  tibble(
+    Operator = character(), City_clean = character(), State = character(),
+    Country = character(), Region = character(), is_us = logical(),
+    Quarter = character(), Quarter_Date = as.Date(character()),
+    MW_available = double(), MW_min = double(), MW_max = double(),
+    Latitude = double(), Longitude = double()
+  )
 }
 
 load_current_pipeline <- function() {
   con <- get_con()
   on.exit(dbDisconnect(con), add = TRUE)
   
-  if (!"dc_pipeline_current" %in% dbListTables(con)) {
-    return(tibble(
-      Operator = character(), City_clean = character(), State = character(),
-      Country = character(), Region = character(), is_us = logical(),
-      Quarter = character(), Quarter_Date = as.Date(character()),
-      MW_available = double(), Latitude = double(), Longitude = double()
-    ))
-  }
+  if (!"dc_pipeline_current" %in% dbListTables(con)) return(empty_pipeline_tbl())
   
   df <- dbReadTable(con, "dc_pipeline_current") %>% as_tibble()
   
-  if ("Quarter_Date" %in% names(df)) df$Quarter_Date <- as.Date(df$Quarter_Date)
+  if (nrow(df) == 0) return(empty_pipeline_tbl())
+  
+  # SQLite may hand dates back as numbers (days since 1970) or as text
+  if ("Quarter_Date" %in% names(df)) {
+    qd <- df$Quarter_Date
+    df$Quarter_Date <- if (is.numeric(qd)) as.Date(qd, origin = "1970-01-01") else as.Date(qd)
+  } else {
+    df$Quarter_Date <- quarter_to_date(df$Quarter)
+  }
+  
   df$is_us <- as.logical(df$is_us)
+  
+  if (!"Latitude" %in% names(df)) df$Latitude <- NA_real_
+  if (!"Longitude" %in% names(df)) df$Longitude <- NA_real_
+  
+  # Older snapshots have no min/max: fall back to the single estimate
+  if (!"MW_min" %in% names(df)) df$MW_min <- df$MW_available
+  if (!"MW_max" %in% names(df)) df$MW_max <- df$MW_available
+  df$MW_min <- coalesce(df$MW_min, df$MW_available)
+  df$MW_max <- coalesce(df$MW_max, df$MW_available)
   
   df
 }
@@ -557,6 +820,31 @@ list_versions <- function() {
   if (!"dc_meta" %in% dbListTables(con)) return(tibble())
   
   dbReadTable(con, "dc_meta") %>% arrange(desc(version)) %>% as_tibble()
+}
+
+# ---------- Data-quality flags from the last import ----------
+
+empty_flags_tbl <- function() {
+  tibble(
+    Excel_Row = integer(), Operator = character(), Market = character(),
+    Field = character(), Value_in_sheet = character(),
+    Read_as = character(), Issue = character()
+  )
+}
+
+save_import_flags <- function(flags) {
+  con <- get_con()
+  on.exit(dbDisconnect(con), add = TRUE)
+  dbWriteTable(con, "import_flags", flags, overwrite = TRUE)
+}
+
+load_import_flags <- function() {
+  con <- get_con()
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  if (!"import_flags" %in% dbListTables(con)) return(empty_flags_tbl())
+  
+  dbReadTable(con, "import_flags") %>% as_tibble()
 }
 
 # ============================================================
@@ -667,8 +955,10 @@ restore_version <- function(v) {
 # IMPORT CHANGE DETECTION
 # ============================================================
 
+# File hash + schema version: changing the parsing logic (bump
+# IMPORT_SCHEMA_VERSION) forces one fresh import on the next launch.
 file_signature <- function() {
-  unname(tools::md5sum(MASTER_FILE))
+  paste0(unname(tools::md5sum(MASTER_FILE)), "|schema", IMPORT_SCHEMA_VERSION)
 }
 
 get_stored_signature <- function() {
@@ -708,7 +998,6 @@ import_master_excel <- function(progress_fn = NULL) {
   import_sig <- file_signature()
   
   raw <- readxl::read_excel(MASTER_FILE, col_types = "text")
-  names(raw) <- str_trim(names(raw))
   
   parsed <- clean_master_df(raw)
   
@@ -728,9 +1017,15 @@ import_master_excel <- function(progress_fn = NULL) {
   parsed$current <- parsed$current %>% select(-row_id)
   
   save_new_version(parsed$current, parsed$pipeline, note = "Refresh from DC.xlsx")
+  save_import_flags(parsed$flags)
   set_stored_signature(import_sig)
   
-  list(current = parsed$current, pipeline = parsed$pipeline)
+  list(
+    current = parsed$current,
+    pipeline = parsed$pipeline,
+    flags = parsed$flags,
+    quarters = parsed$quarters
+  )
 }
 
 # ============================================================
@@ -762,10 +1057,22 @@ if (!file.exists(MASTER_FILE)) {
   
   if (!is.null(startup_import_result)) {
     cat(sprintf(
-      "Startup import complete: %d sites, %d upcoming-capacity entries.\n",
+      "Startup import complete: %d sites, %d upcoming-capacity entries, %d quarter columns.\n",
       nrow(startup_import_result$current),
-      nrow(startup_import_result$pipeline)
+      nrow(startup_import_result$pipeline),
+      length(startup_import_result$quarters)
     ))
+    
+    fl <- startup_import_result$flags
+    if (nrow(fl) > 0) {
+      cat(sprintf("%d capacity entries need review (see Version History > Data quality check):\n", nrow(fl)))
+      for (i in seq_len(min(nrow(fl), 10))) {
+        cat(sprintf("  row %d | %s | %s | '%s' | %s\n",
+                    fl$Excel_Row[i], fl$Operator[i], fl$Field[i],
+                    fl$Value_in_sheet[i], fl$Issue[i]))
+      }
+      if (nrow(fl) > 10) cat(sprintf("  ... and %d more\n", nrow(fl) - 10))
+    }
   }
 }
 
@@ -1209,6 +1516,11 @@ body {
   box-shadow: 0 0 0 3px rgba(34,197,94,.18);
 }
 a.pill:hover { border-color: var(--blue); color: #fff; }
+.pill-warn {
+  border-color: rgba(245,158,11,.5); color: #FCD34D;
+  background: rgba(245,158,11,.10); cursor: pointer;
+}
+a.pill.pill-warn:hover { border-color: var(--amber); color: #FDE68A; }
 
 /* ---------- Tabs ---------- */
 .nav-tabs { border-bottom: 1px solid var(--line) !important; margin-bottom: 18px; gap: 4px; }
@@ -1372,6 +1684,13 @@ a.pill:hover { border-color: var(--blue); color: #fff; }
 
 .sb-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .sb-presets .btn { flex: 1; }
+.sb-presets .btn.is-active {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+}
+.sb-note {
+  display: flex; gap: 8px; align-items: flex-start;
+  font-size: 12px; line-height: 1.4; color: var(--ink-3); margin: -2px 2px 10px;
+}
 .sb-chips { margin-bottom: 8px; }
 .sb-chip {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1503,6 +1822,8 @@ table.dataTable tbody tr:hover td { background-color: #17212F !important; }
 /* ---------- Misc ---------- */
 .btn-outline-primary { --bs-btn-color: #93C5FD; --bs-btn-border-color: #2B4A7A; --bs-btn-hover-bg: var(--blue); --bs-btn-hover-border-color: var(--blue); }
 .version-note { color: var(--ink-2); font-size: 13.5px; max-width: 70ch; }
+.dq-ok { color: var(--ink-2); }
+.dq-ok svg, .dq-ok .fa { color: var(--green); margin-right: 6px; }
 :focus-visible { outline: 2px solid var(--blue-2); outline-offset: 2px; }
 @media (max-width: 768px) {
   .app-title-sub { display: none; }
@@ -1599,7 +1920,8 @@ FIND_CSS <- r"---(
 .fc-pct { font-weight:750; font-size:20px; color:#F8FAFC; font-variant-numeric:tabular-nums; }
 .fc-why { font-size:12.5px; color:var(--ink-2); line-height:1.5; }
 .fc-gap { color:#FBBF24; }
-.fc-tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px; border:1px solid var(--line-2); color:var(--ink-2); margin-right:6px; }
+.fc-tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px; border:1px solid var(--line-2); color:var(--ink-2); margin-right:6px; margin-bottom:4px; }
+.fc-firm { border-color:rgba(34,197,94,.45); color:#86EFAC; }
 .fc-summary { padding:14px 18px; border-radius:12px; background:var(--panel-2); border:1px solid var(--line); margin-bottom:16px; font-size:14px; }
 .fc-summary b { color:var(--blue-2); }
 )---"
@@ -1666,6 +1988,7 @@ ui <- page_sidebar(
         tags$a(class = "pill", href = SHAREPOINT_URL, target = "_blank", rel = "noopener",
                icon("file-excel"), "Master workbook")
       },
+      uiOutput("hdr_flags", inline = TRUE),
       uiOutput("hdr_fresh", inline = TRUE)
     )
   ),
@@ -1810,16 +2133,12 @@ ui <- page_sidebar(
       ),
       
       div(class = "sb-section-label", "Timing"),
-      div(
-        class = "sb-presets",
-        actionButton("q_2026", "2026", class = "btn-sm btn-outline-primary"),
-        actionButton("q_2027", "2027", class = "btn-sm btn-outline-primary"),
-        actionButton("q_2028", "2028", class = "btn-sm btn-outline-primary"),
-        actionButton("q_2029", "2029", class = "btn-sm btn-outline-primary")
-      ),
-      selectizeInput("quarter_filter", NULL, choices = QUARTER_COLS, multiple = TRUE,
+      uiOutput("year_presets"),
+      selectizeInput("quarter_filter", NULL, choices = NULL, multiple = TRUE,
                      options = list(placeholder = "All quarters",
                                     plugins = list("remove_button"))),
+      checkboxInput("pipeline_include_past", "Include past quarters", value = FALSE),
+      uiOutput("past_note"),
       
       div(class = "sb-section-label", "MW available"),
       range_slider("pipeline_mw_filter", 0, 100, c(0, 100), step = 0.1)
@@ -1854,7 +2173,7 @@ ui <- page_sidebar(
       card(
         full_screen = TRUE,
         card_title("earth-americas", "Map of total capacity",
-                   "Bigger, darker dots = more MW. Click a dot for details."),
+                   "Bigger, darker dots = more MW. Hover or click a dot for details."),
         leafletOutput("map", height = 520)
       ),
       
@@ -1908,13 +2227,13 @@ ui <- page_sidebar(
       card(
         full_screen = TRUE,
         card_title("map-location-dot", "Upcoming capacity map",
-                   "Each dot is one site and quarter"),
+                   "Each dot is one site and quarter. Hover for the MW range."),
         leafletOutput("pipeline_map", height = 560)
       ),
       
       card(
         card_title("chart-column", "Upcoming capacity by quarter",
-                   "Hover a bar to see the operator breakdown"),
+                   "Hover a bar to see the operator breakdown and MW range"),
         plotlyOutput("pipeline_quarter_chart", height = "380px")
       ),
       
@@ -1947,7 +2266,7 @@ ui <- page_sidebar(
             div(class = "sb-section-label", "MW needed (minimum \u2013 ideal)"),
             range_slider("fc_need", 0, 100, c(10, 50), step = 1)
           ),
-          selectInput("fc_when", "Needed by", choices = QUARTER_COLS, selected = "Q4 2027"),
+          selectInput("fc_when", "Needed by", choices = NULL),
           div(
             div(class = "sb-section-label", "Scope"),
             div(class = "seg-toggle",
@@ -2020,6 +2339,20 @@ ui <- page_sidebar(
       ),
       
       card(
+        card_title("clipboard-check", "Data quality check",
+                   "Capacity values in DC.xlsx that could not be read cleanly"),
+        uiOutput("flag_summary"),
+        DTOutput("flag_table"),
+        card_footer(
+          downloadButton(
+            "download_flags",
+            "Download review list (CSV)",
+            class = "btn-outline-primary btn-sm"
+          )
+        )
+      ),
+      
+      card(
         card_title("clock-rotate-left", "History"),
         p(
           class = "version-note",
@@ -2047,14 +2380,22 @@ reset_view_button <- function(input_id) {
   )
 }
 
+# Base map shared by all four maps (data is added later through leafletProxy)
+base_leaflet <- function(...) {
+  leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18, ...)) %>%
+    addTiles(
+      urlTemplate = CARTO_POSITRON_URL,
+      attribution = CARTO_ATTRIBUTION,
+      options = tileOptions(noWrap = TRUE)
+    ) %>%
+    setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85)
+}
+
 server <- function(input, output, session) {
   
   cur <- load_current()
   raw_data <- reactiveVal(cur)
-  
-  raw_pipeline <- reactiveVal(
-    attach_pipeline_coordinates(load_current_pipeline(), cur)
-  )
+  raw_pipeline <- reactiveVal(load_current_pipeline())
   
   cap_slider_max <- reactiveVal(100)
   pipe_slider_max <- reactiveVal(100)
@@ -2063,7 +2404,42 @@ server <- function(input, output, session) {
   fmt <- function(x) format(round(x), big.mark = ",")
   
   # ----------------------------------------------------------
-  # Header: "last updated" pill
+  # Current quarter (refreshed every few hours so a long-running
+  # app rolls over on its own; downstream only re-runs on change)
+  # ----------------------------------------------------------
+  
+  today_q <- reactiveVal(current_quarter_start())
+  
+  observe({
+    invalidateLater(6 * 60 * 60 * 1000, session)
+    q <- current_quarter_start()
+    if (!identical(q, isolate(today_q()))) today_q(q)
+  })
+  
+  # Upcoming capacity that has not slipped into the past
+  pipeline_active <- reactive({
+    raw_pipeline() %>% filter(!is.na(Quarter_Date), Quarter_Date >= today_q())
+  })
+  
+  # What the Upcoming Capacity tab works from (past quarters are opt-in)
+  pipeline_base <- reactive({
+    if (isTRUE(input$pipeline_include_past)) raw_pipeline() else pipeline_active()
+  })
+  
+  # Quarter labels available in the sheet, in date order
+  quarters_of <- function(df) {
+    if (nrow(df) == 0) return(character(0))
+    df %>%
+      filter(!is.na(Quarter_Date)) %>%
+      distinct(Quarter, Quarter_Date) %>%
+      arrange(Quarter_Date) %>%
+      pull(Quarter)
+  }
+  
+  quarter_choices <- reactive(quarters_of(pipeline_base()))
+  
+  # ----------------------------------------------------------
+  # Header: "last updated" pill + data-quality pill
   # ----------------------------------------------------------
   
   last_update <- reactive({
@@ -2084,6 +2460,30 @@ server <- function(input, output, session) {
       span(class = "live-dot"),
       paste0("Updated ", substr(v$timestamp, 1, 16), " (v", v$version, ")")
     )
+  })
+  
+  import_flags <- reactive({
+    refresh_trigger()
+    load_import_flags()
+  })
+  
+  output$hdr_flags <- renderUI({
+    n <- nrow(import_flags())
+    if (n == 0) return(NULL)
+    
+    actionLink(
+      "go_quality",
+      label = tagList(
+        icon("triangle-exclamation"),
+        paste0(n, if (n == 1) " entry" else " entries", " to review")
+      ),
+      class = "pill pill-warn",
+      title = "Some capacity values in DC.xlsx could not be read cleanly. Click to review."
+    )
+  })
+  
+  observeEvent(input$go_quality, {
+    bslib::nav_select("main_tabs", "Version History", session = session)
   })
   
   output$data_freshness <- renderText({
@@ -2183,7 +2583,7 @@ server <- function(input, output, session) {
       return()
     }
     
-    # ---- Data Centers tab (unchanged) ----
+    # ---- Data Centers tab ----
     if (identical(type, "State")) {
       updateSelectizeInput(session, "state_filter", selected = value)
     } else if (identical(type, "Country")) {
@@ -2273,6 +2673,36 @@ server <- function(input, output, session) {
     updateSelectizeInput(session, "pipeline_state_filter", choices = pl_states, server = TRUE)
   }, ignoreNULL = FALSE)
   
+  # Quarter dropdown: built from the sheet, always in date order
+  observeEvent(quarter_choices(), {
+    qs <- quarter_choices()
+    
+    updateSelectizeInput(
+      session, "quarter_filter",
+      choices = qs,
+      selected = intersect(input$quarter_filter, qs)
+    )
+  }, ignoreNULL = FALSE)
+  
+  # "Needed by" dropdown on Find Capacity (future quarters only).
+  # Keeps the current choice if it still exists, otherwise ~1 year out.
+  observeEvent(pipeline_active(), {
+    qs <- quarters_of(pipeline_active())
+    
+    if (length(qs) == 0) {
+      updateSelectInput(session, "fc_when", choices = character(0))
+      return()
+    }
+    
+    sel <- input$fc_when
+    if (is.null(sel) || !sel %in% qs) {
+      target <- seq(today_q(), by = "3 months", length.out = 5)[5]
+      sel <- qs[which.min(abs(as.numeric(quarter_to_date(qs) - target)))]
+    }
+    
+    updateSelectInput(session, "fc_when", choices = qs, selected = sel)
+  }, ignoreNULL = FALSE)
+  
   observeEvent(
     list(raw_data(), input$scope, input$state_filter, input$country_filter),
     {
@@ -2319,7 +2749,7 @@ server <- function(input, output, session) {
     
     if (identical(input$main_tabs, "Upcoming Capacity")) {
       n <- nrow(filtered_pipeline())
-      total <- nrow(raw_pipeline())
+      total <- nrow(pipeline_base())
       label <- "upcoming entries"
     } else {
       n <- nrow(filtered())
@@ -2460,6 +2890,7 @@ server <- function(input, output, session) {
     updateRadioButtons(session, "scope", selected = "global")
     updateRadioButtons(session, "pipeline_scope", selected = "global")
     updateRadioButtons(session, "donut_by", selected = "country")
+    updateCheckboxInput(session, "pipeline_include_past", value = FALSE)
     
     for (id in c("state_filter", "country_filter", "city_filter",
                  "operator_filter", "pipeline_country_filter",
@@ -2515,7 +2946,7 @@ server <- function(input, output, session) {
   # ----------------------------------------------------------
   
   filtered_pipeline <- reactive({
-    df <- raw_pipeline()
+    df <- pipeline_base()
     
     if (identical(input$pipeline_scope, "us")) {
       df <- df %>% filter(is_us)
@@ -2555,22 +2986,66 @@ server <- function(input, output, session) {
                       max = ceiling(max_mw), value = c(0, ceiling(max_mw)))
   }, ignoreNULL = FALSE)
   
-  # Year shortcut buttons
-  lapply(2026:2029, function(y) {
-    observeEvent(input[[paste0("q_", y)]], {
-      year_qs  <- QUARTER_COLS[grepl(as.character(y), QUARTER_COLS, fixed = TRUE)]
-      selected <- input$quarter_filter
-      if (is.null(selected)) selected <- character(0)
-      
-      new_sel <- if (all(year_qs %in% selected)) {
-        setdiff(selected, year_qs)
-      } else {
-        union(selected, year_qs)
-      }
-      
-      updateSelectizeInput(session, "quarter_filter",
-                           selected = QUARTER_COLS[QUARTER_COLS %in% new_sel])
-    })
+  # ---- Year shortcut buttons: one per year found in the sheet, additive ----
+  
+  output$year_presets <- renderUI({
+    qs <- quarter_choices()
+    if (length(qs) == 0) return(NULL)
+    
+    yrs <- format(quarter_to_date(qs), "%Y")
+    selected <- input$quarter_filter %||% character(0)
+    
+    div(
+      class = "sb-presets",
+      lapply(unique(yrs), function(y) {
+        year_qs <- qs[yrs == y]
+        is_active <- length(selected) > 0 && all(year_qs %in% selected)
+        
+        tags$button(
+          type = "button",
+          class = paste("btn btn-sm btn-outline-primary", if (is_active) "is-active"),
+          `aria-pressed` = if (is_active) "true" else "false",
+          onclick = sprintf(
+            "Shiny.setInputValue('year_toggle', {year: '%s'}, {priority: 'event'});", y
+          ),
+          y
+        )
+      })
+    )
+  })
+  
+  observeEvent(input$year_toggle, {
+    y <- input$year_toggle$year
+    qs <- quarter_choices()
+    year_qs <- qs[format(quarter_to_date(qs), "%Y") == y]
+    selected <- input$quarter_filter %||% character(0)
+    
+    new_sel <- if (all(year_qs %in% selected)) {
+      setdiff(selected, year_qs)
+    } else {
+      union(selected, year_qs)
+    }
+    
+    updateSelectizeInput(session, "quarter_filter", selected = qs[qs %in% new_sel])
+  })
+  
+  output$past_note <- renderUI({
+    if (isTRUE(input$pipeline_include_past)) return(NULL)
+    
+    pl <- raw_pipeline()
+    n_past <- sum(!is.na(pl$Quarter_Date) & pl$Quarter_Date < today_q())
+    
+    if (n_past == 0) return(NULL)
+    
+    div(
+      class = "sb-note",
+      icon("clock-rotate-left"),
+      span(paste0(
+        n_past, if (n_past == 1) " entry dated" else " entries dated",
+        " before ", quarter_label(today_q()), " ",
+        if (n_past == 1) "is" else "are", " hidden."
+      ))
+    )
   })
   
   # ----------------------------------------------------------
@@ -2580,10 +3055,9 @@ server <- function(input, output, session) {
   # The highlight window runs from the current quarter through the quarter
   # picked on the timeline strip (input$hl_through, e.g. "Q4 2027").
   hl_end <- reactive({
-    today_q <- as.Date(cut(Sys.Date(), "quarter"))
     q <- input$hl_through
     d <- if (is.null(q)) as.Date(NA) else quarter_to_date(q)
-    if (is.na(d)) d <- seq(today_q, by = "3 months", length.out = 8)[8]
+    if (is.na(d)) d <- seq(today_q(), by = "3 months", length.out = 8)[8]
     d
   })
   
@@ -2593,15 +3067,14 @@ server <- function(input, output, session) {
   })
   
   upcoming_soon_keys <- reactive({
-    pl <- raw_pipeline()
+    pl <- pipeline_active()
     
     if (nrow(pl) == 0) return(character(0))
     
-    today_q <- as.Date(cut(Sys.Date(), "quarter"))
     end_q <- hl_end()
     
     pl %>%
-      filter(!is.na(Quarter_Date), Quarter_Date >= today_q, Quarter_Date <= end_q) %>%
+      filter(Quarter_Date <= end_q) %>%
       mutate(key = paste(Operator, City_clean, State, Country, sep = "|")) %>%
       pull(key) %>%
       unique()
@@ -2611,19 +3084,13 @@ server <- function(input, output, session) {
   # Built from the data, so it never needs manual updating. Clicking/dragging is
   # handled in JavaScript (no re-render), which reports the choice as input$hl_through.
   output$hl_timeline <- renderUI({
-    pl <- raw_pipeline() %>% filter(!is.na(Quarter_Date))
+    pl <- pipeline_active()
     if (nrow(pl) == 0) return(NULL)
     
-    today_q <- as.Date(cut(Sys.Date(), "quarter"))
     last_q <- max(pl$Quarter_Date, na.rm = TRUE)
-    if (last_q < today_q) return(NULL)
+    qs <- seq(today_q(), last_q, by = "3 months")
     
-    qs <- seq(today_q, last_q, by = "3 months")
-    q_lab <- function(d) {
-      paste0("Q", (as.integer(format(d, "%m")) - 1) %/% 3 + 1, " ", format(d, "%Y"))
-    }
-    
-    q_df <- tibble(Quarter_Date = qs, Quarter = q_lab(qs)) %>%
+    q_df <- tibble(Quarter_Date = qs, Quarter = quarter_label(qs)) %>%
       left_join(
         pl %>%
           group_by(Quarter_Date) %>%
@@ -2697,17 +3164,33 @@ server <- function(input, output, session) {
   output$vb_pipeline_mw <- renderText(fmt(sum(filtered_pipeline()$MW_available, na.rm = TRUE)))
   
   # ==========================================================
+  # MAP READINESS
+  #   Maps on tabs that have not been opened yet do not exist in the
+  #   browser. Leaflet reports its zoom/bounds as soon as a map is
+  #   built, so we only start sending proxy updates after that.
+  # ==========================================================
+  
+  pipeline_map_ready <- reactiveVal(FALSE)
+  fc_map_ready <- reactiveVal(FALSE)
+  
+  observe({
+    if (!is.null(input$pipeline_map_zoom) || !is.null(input$pipeline_map_bounds)) {
+      pipeline_map_ready(TRUE)
+    }
+  })
+  
+  observe({
+    if (!is.null(input$fc_map_zoom) || !is.null(input$fc_map_bounds)) {
+      fc_map_ready(TRUE)
+    }
+  })
+  
+  # ==========================================================
   # DATA CENTERS MAP
   # ==========================================================
   
   output$map <- renderLeaflet({
-    leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18)) %>%
-      addTiles(
-        urlTemplate = CARTO_POSITRON_URL,
-        attribution = CARTO_ATTRIBUTION,
-        options = tileOptions(noWrap = TRUE)
-      ) %>%
-      setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
+    base_leaflet() %>%
       setView(lng = -98.5, lat = 39.5, zoom = 4) %>%
       addEasyButton(reset_view_button("map_reset"))
   })
@@ -2723,6 +3206,7 @@ server <- function(input, output, session) {
   }
   
   reset_pipeline_view <- function() {
+    req(isTRUE(pipeline_map_ready()))
     proxy <- leafletProxy("pipeline_map")
     
     if (identical(input$pipeline_scope, "us")) {
@@ -2754,7 +3238,7 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
   
   # Markers: heat colour + size by MW, gray = no capacity info,
-  # orange = arriving in the next 4 quarters (when highlight is on)
+  # orange = arriving in the highlight window (when highlight is on)
   observe({
     df <- filtered() %>% filter(!is.na(Latitude), !is.na(Longitude))
     
@@ -2781,19 +3265,34 @@ server <- function(input, output, session) {
         is_zero      = !is.na(Capacity_MW_est) & Capacity_MW_est == 0,
         no_info      = is.na(Capacity_MW_est),
         
-        op_txt = htmltools::htmlEscape(enc2utf8(coalesce(Operator, "Unknown operator"))),
-        city_txt = htmltools::htmlEscape(enc2utf8(coalesce(City_clean, ""))),
-        place_txt = htmltools::htmlEscape(enc2utf8(
+        # Show the MW estimate line when it adds something to the raw text
+        has_est = !is.na(Capacity_MW_est),
+        show_est = has_est & (
+          abs(coalesce(Capacity_MW_max, Capacity_MW_est) -
+                coalesce(Capacity_MW_min, Capacity_MW_est)) >= 0.05 |
+            !is.na(Capacity_Flag)
+        ),
+        est_txt = esc_html(mw_range_txt(Capacity_MW_est, Capacity_MW_min, Capacity_MW_max)),
+        
+        op_txt = esc_html(coalesce(Operator, "Unknown operator")),
+        city_txt = esc_html(coalesce(City_clean, "")),
+        place_txt = esc_html(
           if_else(is.na(State) | State == "", coalesce(Country, ""), State)
-        )),
-        cap_txt = htmltools::htmlEscape(enc2utf8(coalesce(Capacity, "No info"))),
-        cool_txt = htmltools::htmlEscape(enc2utf8(coalesce(Cooling, "Unknown"))),
-        notes_txt = htmltools::htmlEscape(enc2utf8(coalesce(Notes, ""))),
+        ),
+        cap_txt = esc_html(coalesce(Capacity, "No info")),
+        cool_txt = esc_html(coalesce(Cooling, "Unknown")),
+        notes_txt = esc_html(coalesce(Notes, "")),
         popup_html = paste0(
           "<div style='min-width:200px; max-width:280px'>",
           "<b>", op_txt, "</b><br>",
           city_txt, ", ", place_txt, "<br>",
           "Capacity: ", cap_txt,
+          if_else(show_est, paste0("<br>Estimate: ", est_txt), ""),
+          if_else(
+            !is.na(Capacity_Flag),
+            "<br><span style='color:#B45309'>&#9888; Capacity text needs review</span>",
+            ""
+          ),
           if_else(is.na(Cooling), "", paste0("<br>Cooling: ", cool_txt)),
           # Native <details>: the browser keeps it closed until it is clicked
           if_else(
@@ -2812,7 +3311,10 @@ server <- function(input, output, session) {
           ),
           "</div>"
         ),
-        label_txt = paste0(op_txt, " \u2014 ", city_txt)
+        label_txt = paste0(
+          op_txt, " \u2014 ", city_txt,
+          if_else(has_est, paste0(" \u00b7 ", est_txt), "")
+        )
       )
     
     proxy <- leafletProxy("map") %>%
@@ -2918,23 +3420,39 @@ server <- function(input, output, session) {
   output$top_operators_chart <- renderPlotly({
     df <- filtered() %>%
       filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0) %>%
-      mutate(Operator = coalesce(Operator, "Unknown operator")) %>%
+      mutate(
+        Operator = coalesce(Operator, "Unknown operator"),
+        cap_lo = coalesce(Capacity_MW_min, Capacity_MW_est),
+        cap_hi = coalesce(Capacity_MW_max, Capacity_MW_est)
+      ) %>%
       group_by(Operator) %>%
-      summarise(MW = sum(Capacity_MW_est, na.rm = TRUE),
-                Sites = n(), .groups = "drop") %>%
+      summarise(
+        MW = sum(Capacity_MW_est, na.rm = TRUE),
+        MW_lo = sum(cap_lo, na.rm = TRUE),
+        MW_hi = sum(cap_hi, na.rm = TRUE),
+        Sites = n(), .groups = "drop"
+      ) %>%
       arrange(desc(MW)) %>%
       slice_head(n = 10)
     
     if (nrow(df) == 0) return(empty_plot("No capacity matches the current search and filters."))
     
-    df <- df %>% mutate(Operator = factor(Operator, levels = rev(Operator)))
+    df <- df %>%
+      mutate(
+        Operator = factor(Operator, levels = rev(Operator)),
+        span = mw_span_txt(MW_lo, MW_hi),
+        hover = paste0(
+          "<b>", Operator, "</b><br>", fmt(MW), " MW est. across ",
+          Sites, if_else(Sites == 1L, " site", " sites"),
+          if_else(nzchar(span), paste0("<br>Range: ", span, " MW"), "")
+        )
+      )
     
     plot_ly(
       df, x = ~MW, y = ~Operator, type = "bar", orientation = "h",
       text = ~fmt(MW), textposition = "outside", cliponaxis = FALSE,
       textfont = list(color = "#CBD5E1"),
-      hovertext = ~paste0("<b>", Operator, "</b><br>", fmt(MW), " MW across ",
-                          Sites, if_else(Sites == 1L, " site", " sites")),
+      hovertext = ~hover,
       hoverinfo = "text",
       marker = list(color = "#3B82F6")
     ) %>%
@@ -2969,7 +3487,11 @@ server <- function(input, output, session) {
     by_city <- identical(input$donut_by, "city")
     
     df <- filtered() %>%
-      filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0)
+      filter(!is.na(Capacity_MW_est), Capacity_MW_est > 0) %>%
+      mutate(
+        cap_lo = coalesce(Capacity_MW_min, Capacity_MW_est),
+        cap_hi = coalesce(Capacity_MW_max, Capacity_MW_est)
+      )
     
     df <- if (by_city) {
       df %>% mutate(Label = case_when(
@@ -2983,18 +3505,29 @@ server <- function(input, output, session) {
     
     df <- df %>%
       group_by(Label) %>%
-      summarise(MW = sum(Capacity_MW_est, na.rm = TRUE), .groups = "drop") %>%
+      summarise(
+        MW = sum(Capacity_MW_est, na.rm = TRUE),
+        MW_lo = sum(cap_lo, na.rm = TRUE),
+        MW_hi = sum(cap_hi, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
       arrange(desc(MW))
     
     if (nrow(df) == 0) return(empty_plot("No capacity matches the current search and filters."))
     
     if (nrow(df) > 7) {
+      tail_rows <- df[8:nrow(df), ]
       df <- bind_rows(
         df %>% slice_head(n = 7),
         tibble(Label = if (by_city) "Other cities" else "Other",
-               MW = sum(df$MW[8:nrow(df)]))
+               MW = sum(tail_rows$MW),
+               MW_lo = sum(tail_rows$MW_lo),
+               MW_hi = sum(tail_rows$MW_hi))
       )
     }
+    
+    span <- mw_span_txt(df$MW_lo, df$MW_hi)
+    df$range_line <- ifelse(nzchar(span), paste0("Range: ", span, " MW"), "")
     
     cols <- c("#1D4ED8", "#3B82F6", "#60A5FA", "#93C5FD", "#2DD4BF",
               "#F59E0B", "#A78BFA", "#64748B")[seq_len(nrow(df))]
@@ -3003,7 +3536,8 @@ server <- function(input, output, session) {
       df, labels = ~Label, values = ~MW, type = "pie", hole = 0.62,
       sort = FALSE, direction = "clockwise",
       textinfo = "none",
-      hovertemplate = "<b>%{label}</b><br>%{value:,.0f} MW (%{percent})<extra></extra>",
+      text = ~range_line,
+      hovertemplate = "<b>%{label}</b><br>%{value:,.0f} MW (%{percent})<br>%{text}<extra></extra>",
       marker = list(colors = cols, line = list(color = "#0F1620", width = 2))
     ) %>%
       dark_plot(
@@ -3015,29 +3549,31 @@ server <- function(input, output, session) {
   
   # ==========================================================
   # UPCOMING CAPACITY MAP
+  #   The base map is drawn once. Filters, search and tab changes
+  #   only swap the markers through leafletProxy, so there is no
+  #   flicker and the user's zoom/pan is never reset.
   # ==========================================================
   
   output$pipeline_map <- renderLeaflet({
-    df <- filtered_pipeline()
-    searching <- nzchar(search_raw_d())
+    us <- identical(isolate(input$pipeline_scope), "us")
     
-    base_map <- leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18)) %>%
-      addTiles(
-        urlTemplate = CARTO_POSITRON_URL,
-        attribution = CARTO_ATTRIBUTION,
-        options = tileOptions(noWrap = TRUE)
-      ) %>%
-      setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85) %>%
+    base_leaflet() %>%
       setView(
-        lng = if (identical(input$pipeline_scope, "us")) -98.5 else -20,
-        lat = if (identical(input$pipeline_scope, "us")) 39.5 else 25,
-        zoom = if (identical(input$pipeline_scope, "us")) 4 else 2
+        lng = if (us) -98.5 else -20,
+        lat = if (us) 39.5 else 25,
+        zoom = if (us) 4 else 2
       ) %>%
       addEasyButton(reset_view_button("pipeline_map_reset"))
+  })
+  
+  # Points for the map: country centroid fallback + small ring so stacked
+  # rows at the same spot can each be clicked
+  pipeline_map_df <- reactive({
+    df <- filtered_pipeline()
     
-    if (nrow(df) == 0) return(base_map)
+    if (nrow(df) == 0) return(df)
     
-    df <- df %>%
+    df %>%
       left_join(
         country_centroids %>%
           rename(Country_Latitude = Latitude, Country_Longitude = Longitude),
@@ -3046,10 +3582,7 @@ server <- function(input, output, session) {
       mutate(
         map_base_lat = coalesce(Latitude, Country_Latitude),
         map_base_lng = coalesce(Longitude, Country_Longitude)
-      )
-    
-    # Spread rows at the same location so each one can be clicked
-    df <- df %>%
+      ) %>%
       group_by(map_base_lat, map_base_lng) %>%
       mutate(
         point_n = n(),
@@ -3060,12 +3593,20 @@ server <- function(input, output, session) {
         map_lng = map_base_lng +
           (offset_km / (111.32 * pmax(cos(map_base_lat * pi / 180), 0.2))) * cos(angle)
       ) %>%
-      ungroup()
-    
-    map_df <- df %>%
+      ungroup() %>%
       filter(!is.na(map_lat), !is.na(map_lng), !is.na(MW_available), MW_available >= 0)
+  })
+  
+  observe({
+    req(isTRUE(pipeline_map_ready()))
     
-    if (nrow(map_df) == 0) return(base_map)
+    map_df <- pipeline_map_df()
+    
+    proxy <- leafletProxy("pipeline_map") %>%
+      clearMarkers() %>%
+      clearControls()
+    
+    if (nrow(map_df) == 0) return()
     
     min_mw <- min(map_df$MW_available, na.rm = TRUE)
     max_mw <- max(map_df$MW_available, na.rm = TRUE)
@@ -3085,31 +3626,35 @@ server <- function(input, output, session) {
       6 + 12 * sqrt((map_df$MW_available - min_mw) / (max_mw - min_mw))
     }
     
-    esc <- function(x) htmltools::htmlEscape(enc2utf8(as.character(x)))
+    op_txt <- ifelse(is.na(map_df$Operator), "Unknown operator", esc_html(map_df$Operator))
+    place_txt <- ifelse(
+      is.na(map_df$City_clean) | map_df$City_clean == "",
+      esc_html(map_df$Country),
+      esc_html(map_df$City_clean)
+    )
+    state_txt <- ifelse(
+      !is.na(map_df$State) & map_df$State != "",
+      paste0(", ", esc_html(map_df$State)),
+      ""
+    )
+    mw_txt <- esc_html(mw_range_txt(map_df$MW_available, map_df$MW_min, map_df$MW_max))
     
     popup_text <- paste0(
       "<div style='min-width:210px'>",
-      "<b style='font-size:15px'>",
-      ifelse(is.na(map_df$Operator), "Unknown operator", esc(map_df$Operator)),
-      "</b><br>",
-      ifelse(
-        is.na(map_df$City_clean) | map_df$City_clean == "",
-        esc(map_df$Country),
-        esc(map_df$City_clean)
-      ),
-      ifelse(
-        !is.na(map_df$State) & map_df$State != "",
-        paste0(", ", esc(map_df$State)),
-        ""
-      ),
+      "<b style='font-size:15px'>", op_txt, "</b><br>",
+      place_txt, state_txt,
       "<br><br>",
-      "<b>Coming online:</b> ", map_df$Quarter, "<br>",
-      "<b>MW available:</b> ",
-      format(round(map_df$MW_available, 1), big.mark = ","), " MW",
+      "<b>Coming online:</b> ", esc_html(map_df$Quarter), "<br>",
+      "<b>MW available:</b> ", mw_txt,
       "</div>"
     )
     
-    m <- base_map %>%
+    label_text <- paste0(
+      op_txt, " \u2014 ", place_txt, " \u00b7 ", esc_html(map_df$Quarter),
+      " \u00b7 ", mw_txt
+    )
+    
+    proxy %>%
       addCircleMarkers(
         lng = map_df$map_lng,
         lat = map_df$map_lat,
@@ -3119,21 +3664,52 @@ server <- function(input, output, session) {
         color = "#BFDBFE",
         fillColor = pal(map_df$MW_available),
         fillOpacity = 0.85,
-        popup = popup_text
+        popup = popup_text,
+        label = lapply(label_text, htmltools::HTML)
       ) %>%
       addLegend(
         position = "bottomright",
         pal = pal,
         values = map_df$MW_available,
-        title = "Upcoming MW",
+        title = "Upcoming MW (est.)",
         opacity = 0.9,
         labFormat = labelFormat(suffix = " MW")
       )
-    
-    if (searching) m <- fit_points(m, map_df$map_lat, map_df$map_lng)
-    
-    m
   })
+  
+  # Searching zooms to the matching entries; clearing the search resets the view
+  observeEvent(search_raw_d(), {
+    req(identical(input$main_tabs, "Upcoming Capacity"), isTRUE(pipeline_map_ready()))
+    
+    if (!nzchar(search_raw_d())) {
+      reset_pipeline_view()
+      return()
+    }
+    
+    pts <- pipeline_map_df()
+    if (nrow(pts) == 0) return()
+    
+    leafletProxy("pipeline_map") %>% fit_points(pts$map_lat, pts$map_lng)
+  }, ignoreInit = TRUE)
+  
+  # Picking states / countries zooms to them; clearing them resets the view
+  observeEvent(
+    list(input$pipeline_state_filter, input$pipeline_country_filter),
+    {
+      req(identical(input$main_tabs, "Upcoming Capacity"), isTRUE(pipeline_map_ready()))
+      
+      if (length(c(input$pipeline_state_filter, input$pipeline_country_filter)) == 0) {
+        reset_pipeline_view()
+        return()
+      }
+      
+      pts <- pipeline_map_df()
+      if (nrow(pts) == 0) return()
+      
+      leafletProxy("pipeline_map") %>% fit_points(pts$map_lat, pts$map_lng)
+    },
+    ignoreInit = TRUE, ignoreNULL = FALSE
+  )
   
   # ==========================================================
   # CURRENT TABLE (with notes buttons)
@@ -3149,6 +3725,8 @@ server <- function(input, output, session) {
         Region,
         Capacity,
         `Capacity (MW est.)` = Capacity_MW_est,
+        `MW Min` = Capacity_MW_min,
+        `MW Max` = Capacity_MW_max,
         Notes
       ) %>%
       arrange(Operator, Country, State, City)
@@ -3248,47 +3826,72 @@ server <- function(input, output, session) {
     
     df <- df %>%
       mutate(
-        Quarter = factor(Quarter, levels = QUARTER_COLS),
-        Operator = if_else(is.na(Operator) | Operator == "", "Unknown operator", Operator)
+        Operator = if_else(is.na(Operator) | Operator == "", "Unknown operator", Operator),
+        MW_lo = coalesce(MW_min, MW_available),
+        MW_hi = coalesce(MW_max, MW_available)
       )
+    
+    # Every quarter between the first and last one in view, so gaps show as empty
+    all_dates <- seq(min(df$Quarter_Date), max(df$Quarter_Date), by = "3 months")
     
     quarter_totals <- df %>%
       group_by(Quarter) %>%
-      summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop")
-    
-    operator_breakdown <- df %>%
-      group_by(Quarter, Operator) %>%
-      summarise(MW = sum(MW_available, na.rm = TRUE), .groups = "drop") %>%
-      arrange(Quarter, desc(MW)) %>%
-      group_by(Quarter) %>%
       summarise(
-        Breakdown = paste0(
-          "<b>", Operator, "</b>: ",
-          format(round(MW, 1), big.mark = ","), " MW",
-          collapse = "<br>"
-        ),
+        MW = sum(MW_available, na.rm = TRUE),
+        MW_lo = sum(MW_lo, na.rm = TRUE),
+        MW_hi = sum(MW_hi, na.rm = TRUE),
         .groups = "drop"
       )
     
-    chart_data <- quarter_totals %>% left_join(operator_breakdown, by = "Quarter")
+    operator_breakdown <- df %>%
+      group_by(Quarter, Quarter_Date, Operator) %>%
+      summarise(
+        MW = sum(MW_available, na.rm = TRUE),
+        MW_lo = sum(MW_lo, na.rm = TRUE),
+        MW_hi = sum(MW_hi, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        span = mw_span_txt(MW_lo, MW_hi),
+        line = paste0(
+          "<b>", Operator, "</b>: ", fmt_mw(MW), " MW",
+          if_else(nzchar(span), paste0(" (", span, ")"), "")
+        )
+      ) %>%
+      arrange(Quarter_Date, desc(MW)) %>%
+      group_by(Quarter) %>%
+      summarise(Breakdown = paste0(line, collapse = "<br>"), .groups = "drop")
+    
+    chart_data <- tibble(Quarter = quarter_label(all_dates)) %>%
+      left_join(quarter_totals, by = "Quarter") %>%
+      left_join(operator_breakdown, by = "Quarter") %>%
+      mutate(
+        MW = coalesce(MW, 0),
+        total_span = mw_span_txt(MW_lo, MW_hi),
+        bar_label = if_else(MW > 0, format(round(MW, 1), big.mark = ","), ""),
+        hover = paste0(
+          "<b>", Quarter, "</b>",
+          "<br><b>Total: ", format(round(MW, 1), big.mark = ","), " MW</b>",
+          if_else(!is.na(total_span) & nzchar(total_span),
+                  paste0("<br>Range: ", total_span, " MW"), ""),
+          if_else(is.na(Breakdown), "", paste0("<br><br>", Breakdown))
+        )
+      )
     
     plot_ly(
       data = chart_data,
       x = ~Quarter, y = ~MW, type = "bar",
-      text = ~format(round(MW, 1), big.mark = ","),
+      text = ~bar_label,
       textposition = "outside", cliponaxis = FALSE,
       textfont = list(color = "#CBD5E1"),
-      hovertext = ~paste0(
-        "<b>", Quarter, "</b>",
-        "<br><b>Total: ", format(round(MW, 1), big.mark = ","), " MW</b>",
-        "<br><br>", Breakdown
-      ),
+      hovertext = ~hover,
       hoverinfo = "text",
       marker = list(color = "#3B82F6")
     ) %>%
       dark_plot(
         xaxis = list(
-          title = NULL, categoryorder = "array", categoryarray = QUARTER_COLS,
+          title = NULL, type = "category",
+          categoryorder = "array", categoryarray = chart_data$Quarter,
           tickfont = list(color = "#CBD5E1"), gridcolor = "#1E2A3A", linecolor = "#2A3A50"
         ),
         yaxis = list(
@@ -3307,8 +3910,7 @@ server <- function(input, output, session) {
   
   pipeline_table_data <- reactive({
     filtered_pipeline() %>%
-      mutate(Quarter_Order = match(Quarter, QUARTER_COLS)) %>%
-      arrange(Quarter_Order, Operator, Country, State, City_clean) %>%
+      arrange(Quarter_Date, Operator, Country, State, City_clean) %>%
       transmute(
         Operator,
         City = City_clean,
@@ -3317,7 +3919,9 @@ server <- function(input, output, session) {
         Region,
         Quarter,
         `MW Available` = MW_available,
-        Quarter_Order
+        `MW Min` = MW_min,
+        `MW Max` = MW_max,
+        Quarter_Order = as.integer(Quarter_Date)
       )
   })
   
@@ -3332,6 +3936,9 @@ server <- function(input, output, session) {
       ))
     }
     
+    order_col <- which(names(df) == "Quarter_Order") - 1L
+    quarter_col <- which(names(df) == "Quarter") - 1L
+    
     dt <- datatable(
       df,
       rownames = FALSE,
@@ -3342,10 +3949,10 @@ server <- function(input, output, session) {
         pageLength = 25,
         dom = "lfrtip",
         autoWidth = FALSE,
-        order = list(list(7, "asc")),
+        order = list(list(order_col, "asc")),
         columnDefs = list(
-          list(visible = FALSE, targets = 7),
-          list(orderData = 7, targets = 5))
+          list(visible = FALSE, targets = order_col),
+          list(orderData = order_col, targets = quarter_col))
       )
     )
     
@@ -3367,15 +3974,18 @@ server <- function(input, output, session) {
   # FIND CAPACITY
   #   Only sites with upcoming capacity are offered: a site with
   #   nothing in the pipeline is at capacity.
-  #   Upcoming MW is summed per site up to the deadline.
+  #   Upcoming MW is summed per site up to the deadline (past
+  #   quarters are ignored).
   #   MW range: minimum = must-have, ideal = target.
+  #   Each site also carries a low/high estimate so a match can be
+  #   labelled "firm" (even the low estimate meets the minimum).
   # ==========================================================
   
   fc_slider_max <- reactiveVal(100)
   sync_range("fc_need", fc_slider_max)
   
-  observeEvent(raw_pipeline(), {
-    pl <- raw_pipeline()
+  observeEvent(pipeline_active(), {
+    pl <- pipeline_active()
     
     updateSelectizeInput(
       session, "fc_state",
@@ -3428,7 +4038,7 @@ server <- function(input, output, session) {
         .groups = "drop"
       )
     
-    df <- raw_pipeline() %>%
+    df <- pipeline_active() %>%
       mutate(key = site_key(.)) %>%
       filter(!is.na(Quarter_Date), Quarter_Date <= deadline, MW_available > 0)
     
@@ -3440,6 +4050,8 @@ server <- function(input, output, session) {
       mutate(cum = cumsum(MW_available)) %>%
       summarise(
         MW = sum(MW_available, na.rm = TRUE),
+        MW_lo = sum(coalesce(MW_min, MW_available), na.rm = TRUE),
+        MW_hi = sum(coalesce(MW_max, MW_available), na.rm = TRUE),
         Meets_in = Quarter[which(cum >= lo)[1]],
         Meets_date = Quarter_Date[which(cum >= lo)[1]],
         Last_Q = dplyr::last(Quarter),
@@ -3450,7 +4062,7 @@ server <- function(input, output, session) {
       ) %>%
       left_join(attrs, by = "key") %>%
       transmute(
-        Operator, Market = City_clean, State, Country, MW,
+        Operator, Market = City_clean, State, Country, MW, MW_lo, MW_hi,
         Delivers = coalesce(Meets_in, Last_Q),
         Deliver_Date = coalesce(Meets_date, Last_date),
         Price, PUE,
@@ -3470,6 +4082,7 @@ server <- function(input, output, session) {
     df <- df %>%
       mutate(
         meets = MW >= lo,
+        firm = meets & MW_lo >= lo,
         
         # 55 pts MW fit: 40 for reaching the minimum, up to 55 for reaching the ideal
         s_mw = case_when(
@@ -3499,13 +4112,16 @@ server <- function(input, output, session) {
         ),
         Score = round(s_mw + s_time + s_price + s_pue),
         
+        span_txt = mw_span_txt(MW_lo, MW_hi),
+        rng_txt = if_else(nzchar(span_txt), paste0(" [range ", span_txt, "]"), ""),
+        
         mw_txt = case_when(
           MW >= hi ~ paste0("Delivers ", format(round(MW, 1), big.mark = ","),
-                            " MW by ", Delivers, " (ideal ", hi, " met)"),
+                            " MW", rng_txt, " by ", Delivers, " (ideal ", hi, " met)"),
           meets ~ paste0("Delivers ", format(round(MW, 1), big.mark = ","),
-                         " MW by ", Delivers, " (minimum ", lo, " met)"),
+                         " MW", rng_txt, " by ", Delivers, " (minimum ", lo, " met)"),
           TRUE ~ paste0("<span class='fc-gap'>", format(round(lo - MW, 1)),
-                        " MW short of the ", lo, " MW minimum</span>")
+                        " MW short of the ", lo, " MW minimum</span>", rng_txt)
         ),
         price_txt = case_when(
           is.na(max_price) ~ NA_character_,
@@ -3582,7 +4198,14 @@ server <- function(input, output, session) {
           div(class = "fc-bar", span(style = sprintf("width:%d%%", as.integer(r$Score)))),
           span(class = "fc-pct", paste0(r$Score, "%"))
         ),
-        div(span(class = "fc-tag", paste("Delivers:", r$Delivers))),
+        div(
+          span(class = "fc-tag", paste("Delivers:", r$Delivers)),
+          if (isTRUE(r$firm)) {
+            span(class = "fc-tag fc-firm", "Firm: low estimate still meets minimum")
+          } else if (isTRUE(r$meets)) {
+            span(class = "fc-tag", "Depends on where the estimate lands")
+          }
+        ),
         div(class = "fc-why", style = "margin-top:8px", HTML(r$Why))
       )
     }))
@@ -3601,7 +4224,9 @@ server <- function(input, output, session) {
     out <- df %>%
       transmute(
         Operator, Market, State, Country,
-        `MW by deadline` = round(MW, 1), Delivers,
+        `MW by deadline` = round(MW, 1),
+        `MW range` = if_else(nzchar(span_txt), span_txt, fmt_mw(MW)),
+        Delivers,
         `$/kW` = round(Price), PUE, `Match %` = Score
       )
     
@@ -3612,19 +4237,29 @@ server <- function(input, output, session) {
       add_color_bar(out, "Match %")
   })
   
+  # Base map drawn once; results are swapped in through leafletProxy
   output$fc_map <- renderLeaflet({
+    base_leaflet() %>%
+      setView(lng = -40, lat = 30, zoom = 2)
+  })
+  
+  # Remembers which sites were last shown, so the map only re-fits its
+  # view when the set of sites changes (not on every slider nudge)
+  fc_map_state <- new.env()
+  fc_map_state$keys <- NULL
+  
+  observe({
+    req(isTRUE(fc_map_ready()))
+    
     df <- fc_results()
     if (nrow(df) > 0) df <- df %>% filter(!is.na(Latitude), !is.na(Longitude))
     
-    m <- leaflet(options = leafletOptions(minZoom = 2, maxZoom = 18)) %>%
-      addTiles(
-        urlTemplate = CARTO_POSITRON_URL,
-        attribution = CARTO_ATTRIBUTION,
-        options = tileOptions(noWrap = TRUE)
-      ) %>%
-      setView(lng = -40, lat = 30, zoom = 2)
+    proxy <- leafletProxy("fc_map") %>% clearMarkers()
     
-    if (nrow(df) == 0) return(m)
+    if (nrow(df) == 0) {
+      fc_map_state$keys <- character(0)
+      return()
+    }
     
     pal <- colorNumeric(c("#DBEAFE", "#60A5FA", "#1D4ED8", "#0A1A4A"), domain = c(0, 100))
     mw_max <- max(df$MW, 1, na.rm = TRUE)
@@ -3632,21 +4267,33 @@ server <- function(input, output, session) {
     df <- df %>%
       mutate(
         r_px = 6 + 10 * sqrt(pmin(MW / mw_max, 1)),
+        mw_line = esc_html(mw_range_txt(MW, MW_lo, MW_hi)),
         pop = paste0(
-          "<b>", htmltools::htmlEscape(coalesce(Operator, "Unknown")), "</b><br>",
-          htmltools::htmlEscape(coalesce(Market, "")), "<br>",
+          "<b>", esc_html(coalesce(Operator, "Unknown")), "</b><br>",
+          esc_html(coalesce(Market, "")), "<br>",
           Score, "% match<br>", Why
+        ),
+        lab = paste0(
+          esc_html(coalesce(Operator, "Unknown")), " \u2014 ",
+          esc_html(coalesce(Market, "")), " \u00b7 ", mw_line, " by deadline"
         )
       )
     
-    m %>%
+    proxy %>%
       addCircleMarkers(
         data = df, lng = ~Longitude, lat = ~Latitude,
         radius = ~r_px, color = "#BFDBFE", weight = 1.5,
         fillColor = ~pal(Score), fillOpacity = 0.85,
-        popup = ~pop
-      ) %>%
-      fit_points(df$Latitude, df$Longitude)
+        popup = ~pop,
+        label = ~lapply(lab, htmltools::HTML)
+      )
+    
+    keys <- sort(paste(df$Operator, df$Market, df$State, df$Country, sep = "|"))
+    
+    if (!identical(keys, fc_map_state$keys)) {
+      proxy %>% fit_points(df$Latitude, df$Longitude)
+      fc_map_state$keys <- keys
+    }
   })
   
   # ==========================================================
@@ -3715,14 +4362,24 @@ server <- function(input, output, session) {
       })
       
       raw_data(load_current())
-      raw_pipeline(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
+      raw_pipeline(load_current_pipeline())
       refresh_trigger(refresh_trigger() + 1)
       
       showNotification(
         paste0("DC.xlsx imported: ", nrow(result$current), " sites and ",
-               nrow(result$pipeline), " upcoming-capacity entries."),
+               nrow(result$pipeline), " upcoming-capacity entries across ",
+               length(result$quarters), " quarters."),
         type = "message", duration = 8
       )
+      
+      if (nrow(result$flags) > 0) {
+        showNotification(
+          paste0(nrow(result$flags), " capacity ",
+                 if (nrow(result$flags) == 1) "entry needs" else "entries need",
+                 " review - see Data quality check in Version History."),
+          type = "warning", duration = 12
+        )
+      }
     }, error = function(e) {
       showNotification(
         paste("Excel refresh failed:", conditionMessage(e)),
@@ -3730,6 +4387,61 @@ server <- function(input, output, session) {
       )
     })
   })
+  
+  # ==========================================================
+  # DATA QUALITY CHECK
+  # ==========================================================
+  
+  output$flag_summary <- renderUI({
+    f <- import_flags()
+    
+    if (nrow(f) == 0) {
+      return(div(
+        class = "fc-summary dq-ok",
+        icon("circle-check"),
+        "Every capacity value in DC.xlsx was read cleanly."
+      ))
+    }
+    
+    div(
+      class = "fc-summary",
+      tags$b(nrow(f)), if (nrow(f) == 1) " entry" else " entries",
+      " across ", tags$b(n_distinct(f$Excel_Row)),
+      if (n_distinct(f$Excel_Row) == 1) " sheet row" else " sheet rows",
+      " could not be read cleanly. The dashboard used the best reading shown below; ",
+      "fix the text in DC.xlsx (or confirm it is fine) and refresh."
+    )
+  })
+  
+  output$flag_table <- renderDT({
+    f <- import_flags()
+    
+    if (nrow(f) == 0) {
+      return(datatable(
+        tibble(Message = "Nothing to review."),
+        rownames = FALSE, options = list(dom = "t")
+      ))
+    }
+    
+    f %>%
+      select(
+        `Excel row` = Excel_Row, Operator, Market, Field,
+        `Value in sheet` = Value_in_sheet, `Read as` = Read_as, Issue
+      ) %>%
+      datatable(
+        rownames = FALSE, class = "compact hover", selection = "none",
+        options = list(pageLength = 10, dom = "lfrtip")
+      )
+  })
+  
+  output$download_flags <- downloadHandler(
+    filename = function() {
+      paste0("capacity_review_list_", format(Sys.Date(), "%Y%m%d"), ".csv")
+    },
+    content = function(file) {
+      write.csv(import_flags(), file, row.names = FALSE, na = "")
+    }
+  )
   
   # ==========================================================
   # VERSION HISTORY
@@ -3798,7 +4510,7 @@ server <- function(input, output, session) {
     restore_version(v)
     
     raw_data(load_current())
-    raw_pipeline(attach_pipeline_coordinates(load_current_pipeline(), load_current()))
+    raw_pipeline(load_current_pipeline())
     refresh_trigger(refresh_trigger() + 1)
     
     removeModal()
