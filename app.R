@@ -201,11 +201,11 @@ mw_span_txt <- function(lo, hi) {
 # "30 MW (range 20\u201340 MW)" or "18 MW"
 mw_range_txt <- function(est, lo, hi) {
   span <- mw_span_txt(lo, hi)
-  ifelse(
+  as.character(ifelse(
     is.na(est),
     "No data",
     paste0(fmt_mw(est), " MW", ifelse(nzchar(span), paste0(" (range ", span, " MW)"), ""))
-  )
+  ))
 }
 
 # ============================================================
@@ -3342,10 +3342,10 @@ server <- function(input, output, session) {
     df <- df %>%
       mutate(
         radius = if_else(
-          has_capacity,
-          6 + 12 * sqrt((Capacity_MW_est - min_mw) / (max_mw - min_mw)),
-          6
-        ),
+            has_capacity,
+            6 + 12 * sqrt(pmax(0, (coalesce(Capacity_MW_est, min_mw) - min_mw) / (max_mw - min_mw))),
+            6
+          ),
         fill_col = case_when(
           is_upcoming_soon ~ "#F59E0B",
           has_capacity     ~ pal(heat_val),
