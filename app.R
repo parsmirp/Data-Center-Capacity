@@ -1077,6 +1077,428 @@ if (!file.exists(MASTER_FILE)) {
 }
 
 # ============================================================
+# CLIENT PDF (Upcoming Capacity, operator names hidden)
+#   Needs: install.packages("pagedown") + Google Chrome installed.
+#   Logo:  www/logo.png, shown on the dark header and footer so a
+#          light/white logo stays visible.
+# ============================================================
+
+CLIENT_PDF_EYEBROW  <- "Capacity Brief"
+CLIENT_PDF_TITLE    <- "Upcoming Data Center Capacity"
+CLIENT_PDF_SUBTITLE <- "Near-term capacity coming available across the ByteBridge partner network"
+CLIENT_PDF_CTA_HEAD <- "Interested in a site?"
+CLIENT_PDF_CONTACT  <- "sales@bytebt.com"
+CLIENT_PDF_DISCLAIMER <- paste(
+  "Confidential — for discussion purposes only.",
+  "Capacity and delivery dates are indicative, subject to change",
+  "and must be confirmed with ByteBridge."
+)
+CLIENT_PDF_LOGO <- "www/logo.png"
+
+client_pdf_logo <- function() {
+  f <- CLIENT_PDF_LOGO
+  if (!file.exists(f)) return(NULL)
+  mime <- if (grepl("\\.svg$", f, ignore.case = TRUE)) "image/svg+xml"
+          else if (grepl("\\.jpe?g$", f, ignore.case = TRUE)) "image/jpeg"
+          else "image/png"
+  paste0("data:", mime, ";base64,",
+         jsonlite::base64_enc(readBin(f, "raw", file.info(f)$size)))
+}
+
+CLIENT_PDF_CSS <- "
+@page { size: Letter landscape; margin: 0.4in 0.45in 0.7in 0.45in; }
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; color: #142233;
+  font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-feature-settings: 'tnum' 1;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+
+/* ---------- Hero ---------- */
+.hero {
+  position: relative; overflow: hidden; border-radius: 16px;
+  padding: 22px 28px 24px; color: #fff;
+  background:
+    radial-gradient(520px 260px at 92% -20%, rgba(25,181,201,.35), transparent 60%),
+    radial-gradient(420px 240px at 70% 130%, rgba(47,124,246,.30), transparent 60%),
+    linear-gradient(120deg, #07182A 0%, #0D2742 55%, #123A63 100%);
+}
+.hero::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 4px;
+  background: linear-gradient(90deg, #2F7CF6, #19B5C9);
+}
+.hero-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.hero-logo { height: 38px; display: block; }
+.wordmark { font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+.hero-date { text-align: right; font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: #8FB3D9; }
+.hero-date b { display: block; margin-top: 3px; font-size: 13px; letter-spacing: 0; text-transform: none; color: #fff; font-weight: 600; }
+.eyebrow {
+  display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase;
+  color: #7FE3EF; border: 1px solid rgba(127,227,239,.45); border-radius: 999px; padding: 3px 10px; margin-bottom: 10px;
+}
+.hero h1 { margin: 0; font-size: 30px; font-weight: 800; letter-spacing: -.02em; line-height: 1.1; }
+.hero .sub { margin-top: 6px; font-size: 12.5px; color: #B9CCE0; }
+
+/* ---------- KPI cards ---------- */
+.kpis { display: flex; gap: 12px; margin: 16px 0 20px; }
+.kpi {
+  flex: 1; position: relative; overflow: hidden;
+  border: 1px solid #E3E9F0; border-radius: 12px; padding: 12px 16px 12px 18px; background: #fff;
+}
+.kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+               background: linear-gradient(180deg, #2F7CF6, #19B5C9); }
+.kpi .k { font-size: 8.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #64748B; }
+.kpi .v { margin-top: 4px; font-size: 24px; font-weight: 800; letter-spacing: -.02em; color: #0D2742; }
+.kpi .v small { font-size: 12px; font-weight: 600; color: #64748B; margin-left: 3px; }
+
+/* ---------- Section title ---------- */
+.sec { display: flex; align-items: baseline; justify-content: space-between; margin: 0 2px 10px; }
+.sec h2 { margin: 0; font-size: 14px; font-weight: 750; color: #0D2742; }
+.sec span { font-size: 9.5px; color: #64748B; }
+
+/* ---------- Quarter sections (the big break) ---------- */
+.qsec { margin-top: 26px; }
+.qsec.first { margin-top: 0; }
+.qhead {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 13px 20px 12px; border-radius: 12px 12px 0 0; color: #fff;
+  background:
+    radial-gradient(380px 120px at 95% 0%, rgba(25,181,201,.30), transparent 70%),
+    linear-gradient(110deg, #07182A 0%, #0D2742 60%, #123A63 100%);
+  border-bottom: 3px solid #19B5C9;
+  break-inside: avoid; break-after: avoid; page-break-after: avoid;
+}
+.qk { font-size: 8px; font-weight: 800; letter-spacing: .2em; text-transform: uppercase; color: #7FE3EF; }
+.qt { margin-top: 2px; font-size: 24px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05; }
+.qstats { display: flex; gap: 26px; text-align: right; }
+.qstats b { display: block; font-size: 17px; font-weight: 800; letter-spacing: -.01em; }
+.qstats span { font-size: 7.5px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: #8FB3D9; }
+
+/* ---------- Table ---------- */
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 10.5px;
+        border: 1px solid #E3E9F0; border-top: none; border-radius: 0 0 12px 12px; }
+thead { display: table-header-group; }
+th {
+  background: #F3F6FA; color: #64748B; font-size: 8px; font-weight: 700; letter-spacing: .14em;
+  text-transform: uppercase; text-align: left; padding: 8px 14px; border-bottom: 1px solid #E3E9F0;
+}
+th:first-child { text-align: center; }
+th .thq { color: #1D4ED8; }
+td { padding: 8px 14px; border-bottom: 1px solid #EEF2F6; vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+td.n { text-align: center; color: #94A3B8; font-weight: 600; }
+tr { break-inside: avoid; page-break-inside: avoid; }
+.loc { padding-left: 26px; }
+.loc b { display: block; font-size: 11.5px; font-weight: 650; color: #0D2742; }
+.loc span { display: block; margin-top: 1px; font-size: 9.5px; color: #64748B; }
+.cap { display: flex; align-items: center; gap: 12px; }
+.bar { flex: 1; height: 7px; border-radius: 999px; background: #EDF2F7; overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #2F7CF6, #19B5C9); }
+.cap b { min-width: 44px; text-align: right; font-size: 12px; font-weight: 750; color: #0D2742; }
+
+/* ---------- Region sub-groups inside each quarter ---------- */
+tr.rg td { padding: 9px 14px 8px; border-bottom: 1px solid #E3E9F0; break-after: avoid; page-break-after: avoid; }
+.rh { display: flex; align-items: center; justify-content: space-between; }
+.rl { display: flex; align-items: center; gap: 9px; }
+.rdot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.rt { font-size: 11.5px; font-weight: 800; letter-spacing: .02em; color: #0D2742; text-transform: uppercase; }
+.rm { font-size: 9.5px; font-weight: 650; color: #475569; }
+
+/* ---------- Call to action ---------- */
+.cta {
+  margin-top: 24px; padding: 16px 20px; border-radius: 12px; break-inside: avoid;
+  background:
+    radial-gradient(360px 140px at 100% 0%, rgba(25,181,201,.28), transparent 70%),
+    linear-gradient(120deg, #0D2742, #123A63);
+  color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 20px;
+}
+.cta-text b { display: block; font-size: 22px; font-weight: 800; letter-spacing: -.01em; }
+.cta-btn {
+  flex: none; display: inline-block; padding: 12px 26px; border-radius: 999px; text-decoration: none;
+  background: #fff; color: #0D2742; font-size: 22px; font-weight: 800; letter-spacing: -.01em;
+}
+.cta-btn small { display: block; font-size: 8.5px; font-weight: 700; letter-spacing: .18em;
+                 text-transform: uppercase; color: #19A3B5; margin-bottom: 2px; }
+"
+
+# Removes any operator name from a text vector (e.g. a Market called
+# "Equinix Dallas" becomes "Dallas")
+scrub_operators <- function(x, operators) {
+  ops <- unique(operators[!is.na(operators) & nchar(operators) >= 2])
+  ops <- ops[order(-nchar(ops))]            # longest names first
+  esc <- function(s) gsub("([][{}()+*^$|\\\\?.])", "\\\\\\1", s)
+  for (op in ops) {
+    x <- gsub(paste0("\\b", esc(op), "\\b"), "", x, ignore.case = TRUE, perl = TRUE)
+  }
+  x <- str_squish(gsub("^[[:space:][:punct:]]+|[[:space:][:punct:]]+$", "", x))
+  ifelse(is.na(x), "", x)
+}
+
+# ---------- Client regions ----------
+# USA sites use the Region you set in DC.xlsx ("South West" -> "USA – South West").
+# Only if a US row has no Region does the state list below fill it in.
+# Everything else rolls up to Canada / Latin America / EMEA / APAC by country.
+
+CLIENT_PDF_US_REGIONS <- list(           # fallback only, for US rows with a blank Region
+  "North West" = c("WA", "OR", "ID", "MT", "WY", "AK"),
+  "South West" = c("CA", "NV", "AZ", "UT", "CO", "NM", "HI", "TX", "OK"),
+  "Midwest"    = c("ND", "SD", "NE", "KS", "MN", "IA", "MO", "WI", "IL", "IN", "MI", "OH"),
+  "North East" = c("ME", "NH", "VT", "MA", "RI", "CT", "NY", "NJ", "PA", "DE", "MD", "DC"),
+  "South East" = c("VA", "WV", "NC", "SC", "GA", "FL", "AL", "MS", "TN", "KY", "AR", "LA")
+)
+
+CLIENT_PDF_WORLD_REGIONS <- list(
+  "Canada" = c("Canada"),
+  "Latin America" = c("Mexico", "Brazil", "Chile", "Colombia", "Argentina", "Uruguay", "Peru",
+               "Panama", "Costa Rica", "Ecuador", "Dominican Republic", "Guatemala"),
+  "EMEA"   = c("United Kingdom", "UK", "Ireland", "Germany", "France", "Netherlands", "Spain",
+               "Italy", "Sweden", "Norway", "Sweden/Norway", "Poland", "Switzerland", "Portugal",
+               "Belgium", "Denmark", "Finland", "Austria", "Czech Republic", "Czechia", "Greece",
+               "Iceland", "Luxembourg", "Romania", "Hungary", "Bulgaria", "Croatia", "Serbia",
+               "Turkey", "Israel", "United Arab Emirates", "UAE", "Saudi Arabia", "Qatar",
+               "Bahrain", "Oman", "Kuwait", "Egypt", "Morocco", "South Africa", "Kenya", "Nigeria"),
+  "APAC"   = c("Australia", "New Zealand", "Japan", "South Korea", "Korea", "China", "Hong Kong",
+               "Taiwan", "Singapore", "Malaysia", "Indonesia", "Thailand", "Vietnam",
+               "Philippines", "India", "Bangladesh", "Sri Lanka", "Pakistan")
+)
+
+# Preferred display order. USA regions from the sheet that are not listed
+# here still show, alphabetically, after the listed ones.
+CLIENT_PDF_REGION_ORDER <- c(
+  paste("USA –", c("North West", "South West", "Midwest", "North East", "South East")),
+  "USA – Other",
+  names(CLIENT_PDF_WORLD_REGIONS), "Other"
+)
+
+client_region_order <- function(regions) {
+  regions <- unique(regions[!is.na(regions)])
+  known <- intersect(CLIENT_PDF_REGION_ORDER, regions)
+  extra <- setdiff(regions, known)
+  extra_us <- sort(extra[startsWith(extra, "USA")])
+  extra_other <- sort(setdiff(extra, extra_us))
+  us_known <- known[startsWith(known, "USA")]
+  c(setdiff(us_known, "USA – Other"), extra_us, intersect("USA – Other", us_known),
+    setdiff(known, us_known), extra_other)
+}
+
+us_state_abb <- function(s) {
+  s <- str_squish(coalesce(as.character(s), ""))
+  up <- toupper(s)
+  ab <- ifelse(up %in% c(state.abb, "DC"), up,
+               state.abb[match(tolower(s), tolower(state.name))])
+  ab[tolower(s) %in% c("district of columbia", "washington dc", "washington, d.c.")] <- "DC"
+  ab
+}
+
+# "south west", "USA - South West", "US: Southwest" -> "South West"-style label
+clean_sheet_region <- function(r) {
+  r <- str_squish(coalesce(as.character(r), ""))
+  r <- str_replace(r, regex("^(usa|u\\.s\\.a?\\.?|us|united states)\\s*[-–—:|/]?\\s*",
+                            ignore_case = TRUE), "")
+  r <- str_squish(r)
+  ifelse(nzchar(r), str_to_title(r), NA_character_)
+}
+
+client_region <- function(state, country, sheet_region = NULL) {
+  country <- str_squish(coalesce(as.character(country), ""))
+  is_us <- tolower(country) %in% c("united states", "usa", "us", "united states of america")
+  if (is.null(sheet_region)) sheet_region <- rep(NA_character_, length(country))
+
+  # USA -> "USA – <Region from the sheet>", state list only as a fallback
+  ab <- us_state_abb(state)
+  us_lookup <- setNames(rep(names(CLIENT_PDF_US_REGIONS), lengths(CLIENT_PDF_US_REGIONS)),
+                        unlist(CLIENT_PDF_US_REGIONS))
+  us_sub <- coalesce(clean_sheet_region(sheet_region), unname(us_lookup[ab]), "Other")
+  us_lbl <- paste("USA –", us_sub)
+
+  # Rest of world
+  world_lookup <- setNames(rep(names(CLIENT_PDF_WORLD_REGIONS), lengths(CLIENT_PDF_WORLD_REGIONS)),
+                           tolower(unlist(CLIENT_PDF_WORLD_REGIONS)))
+  world_lbl <- unname(world_lookup[tolower(country)])
+
+  ifelse(is_us, us_lbl, coalesce(world_lbl, "Other"))
+}
+
+# Colour swatch per region family: c(dot, row tint)
+client_region_colors <- function(region) {
+  case_when(
+    startsWith(region, "USA")  ~ "#2F7CF6|#EEF4FF",
+    region == "Canada"         ~ "#7C3AED|#F4F0FE",
+    region == "Latin America"  ~ "#F59E0B|#FFF7E8",
+    region == "EMEA"           ~ "#10B981|#ECFAF4",
+    region == "APAC"           ~ "#E11D48|#FDEEF2",
+    TRUE                       ~ "#94A3B8|#F3F6FA"
+  )
+}
+
+# df must already have the Operator column removed; `operators` is the
+# full list of names to scrub from every remaining text field.
+client_pdf_html <- function(df, operators = character(0)) {
+  stopifnot(!"Operator" %in% names(df))
+  e <- function(x) htmltools::htmlEscape(coalesce(as.character(x), ""))
+  logo <- client_pdf_logo()
+  
+  df$Region_Client <- client_region(df$State, df$Country, df$Region)   # before scrubbing
+  df$Region_Client <- scrub_operators(df$Region_Client, operators)
+  for (col in c("City", "State", "Country", "Quarter")) {
+    df[[col]] <- scrub_operators(as.character(df[[col]]), operators)
+  }
+  df$City <- ifelse(nzchar(df$City), df$City, "Undisclosed")
+  df$MW <- coalesce(as.numeric(df$`MW Available`), 0)
+  
+  mw_max <- max(df$MW, 1, na.rm = TRUE)
+  quarters <- unique(df$Quarter)             # already in date order
+  regions_all <- client_region_order(df$Region_Client)
+  
+  plural <- function(n) if (n == 1) " opportunity" else " opportunities"
+  n <- 0L
+  
+  row_html <- function(r) {
+    n <<- n + 1L
+    sub <- c(r$State, r$Country)
+    sub <- sub[!is.na(sub) & nzchar(sub)]
+    paste0(
+      "<tr class='row'>",
+      "<td class='n'>", n, "</td>",
+      "<td class='loc'><b>", e(r$City), "</b>",
+      if (length(sub)) paste0("<span>", e(paste(sub, collapse = " · ")), "</span>") else "",
+      "</td>",
+      "<td><div class='cap'><div class='bar'><i style='width:",
+      max(4, round(100 * r$MW / mw_max)), "%'></i></div><b>", e(fmt_mw(r$MW)), "</b></div></td>",
+      "</tr>"
+    )
+  }
+  
+  # Quarter -> Region -> sites
+  quarter_html <- vapply(seq_along(quarters), function(qi) {
+    q <- quarters[qi]
+    gq <- df[df$Quarter == q, ]
+    regs <- client_region_order(gq$Region_Client)
+    
+    body <- vapply(regs, function(rg) {
+      g <- gq[gq$Region_Client == rg, ]
+      g <- g[order(-g$MW), ]
+      col <- strsplit(client_region_colors(rg), "|", fixed = TRUE)[[1]]
+      paste0(
+        "<tr class='rg'><td colspan='3' style='background:", col[2], "'><div class='rh'>",
+        "<div class='rl'><span class='rdot' style='background:", col[1], "'></span>",
+        "<span class='rt'>", e(rg), "</span></div>",
+        "<span class='rm'>", nrow(g), plural(nrow(g)), " &middot; ", e(fmt_mw(sum(g$MW))), " MW</span>",
+        "</div></td></tr>",
+        paste0(vapply(seq_len(nrow(g)), function(i) row_html(g[i, ]), character(1)), collapse = "")
+      )
+    }, character(1))
+    
+    paste0(
+      "<section class='qsec", if (qi == 1) " first" else "", "'>",
+      "<div class='qhead'><div><div class='qk'>Coming online</div><div class='qt'>", e(q), "</div></div>",
+      "<div class='qstats'>",
+      "<div><b>", nrow(gq), "</b><span>", trimws(plural(nrow(gq))), "</span></div>",
+      "<div><b>", length(regs), "</b><span>", if (length(regs) == 1) "region" else "regions", "</span></div>",
+      "<div><b>", e(fmt_mw(sum(gq$MW))), "</b><span>MW</span></div>",
+      "</div></div>",
+      "<table><colgroup><col style='width:6%'><col style='width:52%'><col style='width:42%'></colgroup>",
+      "<thead><tr><th>#</th><th>Market / Location <span class='thq'>&middot; ", e(q), "</span></th>",
+      "<th>Capacity (MW)</th></tr></thead>",
+      "<tbody>", paste0(body, collapse = ""), "</tbody></table>",
+      "</section>"
+    )
+  }, character(1))
+  
+  d <- Sys.Date()
+  report_date <- paste0(format(d, "%B "), as.integer(format(d, "%d")), format(d, ", %Y"))
+  
+  kpi <- function(k, v, unit = "") {
+    paste0("<div class='kpi'><div class='k'>", k, "</div><div class='v'>", v,
+           if (nzchar(unit)) paste0("<small>", unit, "</small>") else "", "</div></div>")
+  }
+  
+  paste0(
+    "<!doctype html><html><head><meta charset='utf-8'>",
+    "<link rel='preconnect' href='https://fonts.googleapis.com'>",
+    "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap' rel='stylesheet'>",
+    "<style>", CLIENT_PDF_CSS, "</style></head><body>",
+    
+    "<div class='hero'>",
+    "<div class='hero-top'>",
+    if (!is.null(logo)) paste0("<img class='hero-logo' src='", logo, "' alt='ByteBridge'>")
+    else "<div class='wordmark'>ByteBridge</div>",
+    "<div class='hero-date'>Report date<b>", e(report_date), "</b></div>",
+    "</div>",
+    "<div class='eyebrow'>", e(CLIENT_PDF_EYEBROW), "</div>",
+    "<h1>", e(CLIENT_PDF_TITLE), "</h1>",
+    "<div class='sub'>", e(CLIENT_PDF_SUBTITLE), "</div>",
+    "</div>",
+    
+    "<div class='kpis'>",
+    kpi("Opportunities", nrow(df)),
+    kpi("Upcoming capacity", e(fmt_mw(sum(df$MW))), "MW"),
+    kpi("Earliest availability", e(quarters[1])),
+    kpi("Regions", length(regions_all)),
+    "</div>",
+    
+    "<div class='sec'><h2>Capacity pipeline</h2>",
+    "<span>By quarter coming online, then by region &middot; all figures in MW</span></div>",
+    paste0(quarter_html, collapse = ""),
+    
+    "<div class='cta'><div class='cta-text'><b>", e(CLIENT_PDF_CTA_HEAD), "</b></div>",
+    "<a class='cta-btn' href='mailto:", e(CLIENT_PDF_CONTACT), "'><small>Contact us</small>",
+    e(CLIENT_PDF_CONTACT), "</a></div>",
+    "</body></html>"
+  )
+}
+
+# Footer on every page. The logo sits on a dark pill so a white logo stays visible.
+client_pdf_footer <- function() {
+  logo <- client_pdf_logo()
+  brand <- if (!is.null(logo)) {
+    paste0("<img src='", logo, "' style='height:11px; display:block;'>")
+  } else {
+    "<span style='color:#fff; font-weight:700; font-size:8px;'>ByteBridge</span>"
+  }
+
+  paste0(
+    "<div style='width:100%; padding:0 0.45in; display:flex; align-items:center; gap:12px;",
+    " font-family:Inter,Helvetica,Arial,sans-serif; font-size:7.5px; color:#64748B;",
+    " -webkit-print-color-adjust:exact; print-color-adjust:exact;'>",
+    "<span style='background:#0D2742; border-radius:6px; padding:4px 8px; display:inline-flex;",
+    " align-items:center; -webkit-print-color-adjust:exact;'>", brand, "</span>",
+    "<span style='flex:1;'>", htmltools::htmlEscape(CLIENT_PDF_DISCLAIMER), "</span>",
+    "<span style='font-weight:600; color:#0D2742;'>Page <span class='pageNumber'></span>",
+    " of <span class='totalPages'></span></span>",
+    "</div>"
+  )
+}
+
+render_client_pdf <- function(df, out_file, operators = character(0)) {
+  if (!requireNamespace("pagedown", quietly = TRUE)) {
+    stop("The pagedown package is not installed. Run install.packages('pagedown').")
+  }
+  if (!nzchar(tryCatch(pagedown::find_chrome(), error = function(e) ""))) {
+    stop("Google Chrome was not found; it is needed to build the PDF.")
+  }
+
+  tmp_html <- tempfile(fileext = ".html")
+  tmp_pdf <- tempfile(fileext = ".pdf")
+  con <- file(tmp_html, open = "w", encoding = "UTF-8")
+  writeLines(client_pdf_html(df, operators), con)
+  close(con)
+
+  pagedown::chrome_print(
+    input = tmp_html, output = tmp_pdf, wait = 2, timeout = 60, verbose = 0,
+    options = list(
+      displayHeaderFooter = TRUE,
+      headerTemplate = "<div></div>",
+      footerTemplate = client_pdf_footer(),
+      preferCSSPageSize = TRUE,
+      printBackground = TRUE
+    )
+  )
+  file.copy(tmp_pdf, out_file, overwrite = TRUE)
+}
+
+# ============================================================
 # UI HELPERS
 # ============================================================
 
@@ -2246,6 +2668,12 @@ ui <- page_sidebar(
             "download_pipeline",
             "Download filtered results (CSV)",
             class = "btn-outline-primary btn-sm"
+          ),
+          downloadButton(
+            "download_pipeline_pdf",
+            "Download Client PDF",
+            icon = icon("file-pdf"),
+            class = "btn-outline-primary btn-sm ms-2"
           )
         )
       )
@@ -3968,6 +4396,38 @@ server <- function(input, output, session) {
         select(-Quarter_Order) %>%
         write.csv(file, row.names = FALSE, na = "")
     }
+  )
+
+  # Client PDF: same filtered rows as the table, operator names left out
+  output$download_pipeline_pdf <- downloadHandler(
+    filename = function() {
+      paste0("ByteBridge_Upcoming_Capacity_", format(Sys.Date(), "%Y%m%d"), ".pdf")
+    },
+    content = function(file) {
+      full <- pipeline_table_data()
+
+      # Operator names: dropped as a column AND scrubbed from all other text
+      operators <- unique(c(raw_data()$Operator, raw_pipeline()$Operator))
+      df <- full %>% select(-Operator, -Quarter_Order, -`MW Min`, -`MW Max`)   # Region kept for grouping
+
+      if (nrow(df) == 0) {
+        showNotification("No upcoming capacity in view, so there is nothing to export.",
+                         type = "error", duration = 8)
+        stop("No rows to export")
+      }
+
+      tryCatch(
+        withProgress(message = "Building client PDF...", value = 0.5, {
+          render_client_pdf(df, file, operators)
+        }),
+        error = function(e) {
+          showNotification(paste("PDF export failed:", conditionMessage(e)),
+                           type = "error", duration = 12)
+          stop(e)
+        }
+      )
+    },
+    contentType = "application/pdf"
   )
   
   # ==========================================================
