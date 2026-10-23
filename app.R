@@ -25,6 +25,10 @@
 # SQLite is the fast runtime database. Geocoding happens during
 # import and reuses cached coordinates.
 #
+# Maps: every map has a Map / Satellite switch (top-right corner).
+# Every map always opens on "Map" (CARTO Positron); Satellite uses
+# Esri World Imagery with place-name labels on top.
+#
 # Data rules worth knowing:
 #   * Quarter columns are detected from the sheet headers
 #     (any column named like "Q3 2026"), so adding "Q1 2030"
@@ -78,6 +82,18 @@ CARTO_ATTRIBUTION <- paste0(
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> ',
   'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
 )
+
+## Satellite view: place-name labels drawn on top of the imagery.
+## Uses the same Carto key as the regular map (carto_key.txt).
+CARTO_LABELS_URL <- paste0(
+  "https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png",
+  if (nzchar(CARTO_KEY)) paste0("?key=", CARTO_KEY) else ""
+)
+
+# ---------- Basemap switch ----------
+# The first name is the default every map opens on.
+BASEMAP_DEFAULT   <- "Map"
+BASEMAP_SATELLITE <- "Satellite"
 
 # Password required for "Refresh from DC.xlsx" and "Restore version".
 REFRESH_PASSWORD <- Sys.getenv("DC_REFRESH_PASSWORD", unset = "bytebt")
@@ -2241,6 +2257,60 @@ table.dataTable tbody tr:hover td { background-color: #17212F !important; }
 .dc-legend-row { display: flex; align-items: center; gap: 7px; margin-top: 6px; }
 .dc-legend-dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; flex: none; }
 
+/* ---------- Map / Satellite switch (Leaflet layers control) ----------
+   Restyles Leaflet's built-in base-layer radio list as a frosted,
+   pill-shaped segmented control that matches the app's dark theme. */
+.leaflet-control-layers.leaflet-control {
+  background: rgba(8,12,18,.82) !important;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  border: 1px solid rgba(148,163,184,.28) !important;
+  border-radius: 999px !important;
+  box-shadow: 0 8px 22px rgba(0,0,0,.35), 0 1px 0 rgba(255,255,255,.06) inset !important;
+  padding: 3px !important;
+  color: var(--ink) !important;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+.leaflet-control-layers-expanded { padding: 3px !important; }
+.leaflet-control-layers-list { margin: 0 !important; }
+.leaflet-control-layers-base { display: flex; gap: 2px; }
+.leaflet-control-layers-separator,
+.leaflet-control-layers-overlays { display: none !important; }
+.leaflet-control-layers-base label {
+  position: relative; margin: 0 !important; cursor: pointer;
+  border-radius: 999px; padding: 6px 14px;
+  font-size: 12px; font-weight: 650; letter-spacing: .01em; line-height: 1.2;
+  color: var(--ink-2);
+  transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+}
+.leaflet-control-layers-base label > span,
+.leaflet-control-layers-base label > div { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.leaflet-control-layers-base label:hover { color: #F8FAFC; background: rgba(148,163,184,.14); }
+/* hide the native radio but keep it focusable for keyboard users */
+.leaflet-control-layers-base input.leaflet-control-layers-selector {
+  position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none;
+}
+/* small icon dot before each option */
+.leaflet-control-layers-base label > span::before,
+.leaflet-control-layers-base label > div::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor; opacity: .55; flex: none;
+}
+/* selected option */
+.leaflet-control-layers-base label:has(input:checked) {
+  background: linear-gradient(135deg, #3B82F6, #2563EB);
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(59,130,246,.45);
+}
+.leaflet-control-layers-base label:has(input:checked) > span::before,
+.leaflet-control-layers-base label:has(input:checked) > div::before {
+  opacity: 1; background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.25);
+}
+/* fallback for browsers without :has() */
+.leaflet-control-layers-base input:checked + span { color: #fff; font-weight: 750; }
+.leaflet-control-layers-base label:has(input:focus-visible) {
+  outline: 2px solid var(--blue-2); outline-offset: 1px;
+}
+
 /* ---------- Misc ---------- */
 .btn-outline-primary { --bs-btn-color: #93C5FD; --bs-btn-border-color: #2B4A7A; --bs-btn-hover-bg: var(--blue); --bs-btn-hover-border-color: var(--blue); }
 .version-note { color: var(--ink-2); font-size: 13.5px; max-width: 70ch; }
@@ -2250,6 +2320,7 @@ table.dataTable tbody tr:hover td { background-color: #17212F !important; }
 @media (max-width: 768px) {
   .app-title-sub { display: none; }
   .kpi-value { font-size: 24px; }
+  .leaflet-control-layers-base label { padding: 5px 11px; font-size: 11.5px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
@@ -2808,14 +2879,39 @@ reset_view_button <- function(input_id) {
   )
 }
 
-# Base map shared by all four maps (data is added later through leafletProxy)
+# Base map shared by all maps (data is added later through leafletProxy).
+# Two basemaps with a Map / Satellite switch in the top-right corner:
+#   "Map"       - CARTO Positron (the default every map opens on)
+#   "Satellite" - Esri World Imagery + light place-name labels on top
+# The switch is never touched by the marker/legend proxies, so the user's
+# choice stays put while they filter and search.
 base_leaflet <- function(...) {
   leaflet(options = leafletOptions(worldCopyJump = FALSE, minZoom = 2, maxZoom = 18, ...)) %>%
     addTiles(
       urlTemplate = CARTO_POSITRON_URL,
       attribution = CARTO_ATTRIBUTION,
-      options = tileOptions(noWrap = TRUE)
+      options = tileOptions(noWrap = TRUE),
+      group = BASEMAP_DEFAULT
     ) %>%
+    addProviderTiles(
+      providers$Esri.WorldImagery,
+      options = providerTileOptions(noWrap = TRUE, zIndex = 1),
+      group = BASEMAP_SATELLITE
+    ) %>%
+    addTiles(
+      urlTemplate = CARTO_LABELS_URL,
+      attribution = CARTO_ATTRIBUTION,
+      options = tileOptions(noWrap = TRUE, zIndex = 3, subdomains = "abcd"),
+      group = BASEMAP_SATELLITE
+    ) %>%
+    addLayersControl(
+      baseGroups = c(BASEMAP_DEFAULT, BASEMAP_SATELLITE),
+      position = "topright",
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    # Guarantee every map opens on the regular map, never on satellite
+    hideGroup(BASEMAP_SATELLITE) %>%
+    showGroup(BASEMAP_DEFAULT) %>%
     setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85)
 }
 
