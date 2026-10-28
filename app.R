@@ -38,6 +38,10 @@
 #     "20-40 MW" = 30 MW estimate with a 20-40 MW range.
 #   * Anything that cannot be read cleanly is listed under
 #     Version History > Data quality check.
+#
+# Client PDF: the "Report scope" panel, hero subtitle, page footer
+# and file name all reflect the Upcoming Capacity filters in use
+# (markets / states, delivery window, MW range, keyword).
 # ============================================================
 
 # ---------- Packages ----------
@@ -201,9 +205,23 @@ current_quarter_start <- function(d = Sys.Date()) {
 # MW FORMATTING HELPERS (estimate + min-max range text)
 # ============================================================
 
-fmt_mw <- function(x) {
-  ifelse(is.na(x), "\u2013", prettyNum(round(x, 1), big.mark = ","))
+# Exact number, never rounded for display: 0.471 -> "0.471", 18.25 -> "18.25".
+# (round(, 6) only removes floating-point noise such as 0.47100000000000003)
+num_exact <- function(x) {
+  vapply(x, function(v) {
+    if (is.na(v)) return("\u2013")
+    format(round(v, 6), big.mark = ",", scientific = FALSE, digits = 15,
+           drop0trailing = TRUE, trim = TRUE)
+  }, character(1), USE.NAMES = FALSE)
 }
+
+fmt_mw <- function(x) num_exact(x)
+
+# Capacity with the natural unit, exact: 0.471 -> "471 kW", 18.25 -> "18.25 MW".
+# Used by the client PDF so a 471 kW site never reads as "0.5 MW".
+cap_unit <- function(x) ifelse(!is.na(x) & x != 0 & abs(x) < 1, "kW", "MW")
+cap_num  <- function(x) num_exact(ifelse(cap_unit(x) == "kW", x * 1000, x))
+fmt_cap  <- function(x) paste(cap_num(x), cap_unit(x))
 
 # "20\u201340" when there is a real range, "" when min == max or unknown
 mw_span_txt <- function(lo, hi) {
@@ -1211,7 +1229,8 @@ tr { break-inside: avoid; page-break-inside: avoid; }
 .cap { display: flex; align-items: center; gap: 12px; }
 .bar { flex: 1; height: 7px; border-radius: 999px; background: #EDF2F7; overflow: hidden; }
 .bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #2F7CF6, #19B5C9); }
-.cap b { min-width: 44px; text-align: right; font-size: 12px; font-weight: 750; color: #0D2742; }
+.cap b { min-width: 78px; text-align: right; font-size: 12px; font-weight: 750; color: #0D2742; white-space: nowrap; }
+.cap b small { margin-left: 3px; font-size: 9px; font-weight: 650; color: #64748B; }
 
 /* ---------- Region sub-groups inside each quarter ---------- */
 tr.rg td { padding: 9px 14px 8px; border-bottom: 1px solid #E3E9F0; break-after: avoid; page-break-after: avoid; }
@@ -1238,6 +1257,45 @@ tr.rg td { padding: 9px 14px 8px; border-bottom: 1px solid #E3E9F0; break-after:
                  text-transform: uppercase; color: #19A3B5; margin-bottom: 2px; }
 "
 
+# ---------- Report scope panel (which filters this PDF was built with) ----------
+CLIENT_PDF_SCOPE_CSS <- "
+.scope { margin-top: 16px; padding: 12px 14px 14px; border: 1px solid #E3E9F0; border-radius: 14px;
+         background: linear-gradient(180deg, #F8FAFC, #F3F6FA); break-inside: avoid; }
+.scope-head { display: flex; align-items: center; justify-content: space-between; margin: 0 2px 10px; }
+.scope-k { display: flex; align-items: center; gap: 8px; font-size: 8.5px; font-weight: 800;
+           letter-spacing: .18em; text-transform: uppercase; color: #1D4ED8; }
+.scope-k::before { content: ''; width: 7px; height: 7px; border-radius: 50%;
+                   background: linear-gradient(135deg, #2F7CF6, #19B5C9); }
+.scope-note { font-size: 9px; color: #64748B; }
+.scope-grid { display: flex; gap: 10px; align-items: stretch; }
+.sc { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: flex-start; position: relative;
+      background: #fff; border: 1px solid #E3E9F0; border-radius: 10px; padding: 10px 12px; overflow: hidden; }
+.sc.wide { flex: 1.7; }
+.sc.is-set { border-color: #C7D8FB; }
+.sc.is-set::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+                     background: linear-gradient(180deg, #2F7CF6, #19B5C9); }
+.sc-ic { flex: none; width: 28px; height: 28px; border-radius: 8px; background: #EEF4FF;
+         display: flex; align-items: center; justify-content: center; }
+.sc.is-default .sc-ic { background: #F1F5F9; }
+.sc-ic svg { width: 15px; height: 15px; fill: none; stroke: #2F7CF6; stroke-width: 2;
+             stroke-linecap: round; stroke-linejoin: round; }
+.sc.is-default .sc-ic svg { stroke: #94A3B8; }
+.sc-body { min-width: 0; }
+.sc-k { display: flex; align-items: center; gap: 6px; font-size: 7.5px; font-weight: 700;
+        letter-spacing: .14em; text-transform: uppercase; color: #64748B; }
+.sc-tag { font-size: 6.5px; letter-spacing: .12em; padding: 1px 6px; border-radius: 999px;
+          background: #E0ECFF; color: #1D4ED8; }
+.sc-v { margin-top: 4px; font-size: 13px; font-weight: 750; letter-spacing: -.01em; color: #0D2742; }
+.sc.is-default .sc-v { color: #64748B; font-weight: 600; }
+.sc-chips { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px;
+        border-radius: 999px; font-size: 10px; font-weight: 700; color: #0D2742;
+        background: var(--tint, #F3F6FA); border: 1px solid rgba(13,39,66,.07); }
+.chip i { width: 7px; height: 7px; border-radius: 2px; background: var(--dot, #94A3B8); }
+.chip-more { color: #64748B; background: #F3F6FA; }
+.sc.is-default .chip { color: #64748B; }
+"
+
 # Removes any operator name from a text vector (e.g. a Market called
 # "Equinix Dallas" becomes "Dallas")
 scrub_operators <- function(x, operators) {
@@ -1250,6 +1308,48 @@ scrub_operators <- function(x, operators) {
   x <- str_squish(gsub("^[[:space:][:punct:]]+|[[:space:][:punct:]]+$", "", x))
   ifelse(is.na(x), "", x)
 }
+
+# ---------- Report-scope text helpers ----------
+
+# "A" | "A & B" | "A, B & C" | "A, B, C, D + 2 more"
+human_list <- function(x, max_n = 4) {
+  x <- unique(x[!is.na(x) & nzchar(x)])
+  n <- length(x)
+  if (n == 0) return("")
+  if (n == 1) return(x)
+  if (n > max_n) return(paste0(paste(x[1:max_n], collapse = ", "), " + ", n - max_n, " more"))
+  paste0(paste(x[-n], collapse = ", "), " & ", x[n])
+}
+
+# "the United States", "the Netherlands", but "Japan"
+with_the <- function(s) {
+  ifelse(grepl("^(United |Netherlands|Philippines|Czech Republic|Dominican)", s),
+         paste("the", s), s)
+}
+
+# Back-to-back quarters -> "Q1 2027 – Q4 2028"; otherwise a readable list
+quarter_span_txt <- function(qs) {
+  qs <- unique(qs[!is.na(qs)])
+  if (length(qs) == 0) return("")
+  d <- quarter_to_date(qs)
+  o <- order(d)
+  qs <- qs[o]
+  d <- d[o]
+  if (length(qs) == 1) return(qs)
+  expected <- seq(d[1], by = "3 months", length.out = length(d))
+  if (identical(as.numeric(d), as.numeric(expected))) {
+    paste0(qs[1], " \u2013 ", qs[length(qs)])
+  } else {
+    human_list(qs, 6)
+  }
+}
+
+CLIENT_PDF_ICONS <- list(
+  globe  = "<circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18'/>",
+  cal    = "<rect x='3' y='5' width='18' height='16' rx='2'/><path d='M3 10h18M8 3v4M16 3v4'/>",
+  bolt   = "<path d='M13 2 4 14h7l-1 8 9-12h-7z'/>",
+  search = "<circle cx='11' cy='11' r='7'/><path d='m20 20-3.5-3.5'/>"
+)
 
 # ---------- Client regions ----------
 # USA sites use the Region you set in DC.xlsx ("South West" -> "USA – South West").
@@ -1348,9 +1448,63 @@ client_region_colors <- function(region) {
   )
 }
 
+# The "Report scope" panel shown under the hero
+client_pdf_scope_html <- function(scope) {
+  if (is.null(scope)) return("")
+  e <- function(x) htmltools::htmlEscape(as.character(x))
+
+  cell <- function(ic, key, set, value = NULL, chips = NULL, wide = FALSE) {
+    paste0(
+      "<div class='sc", if (wide) " wide" else "", if (set) " is-set" else " is-default", "'>",
+      "<div class='sc-ic'><svg viewBox='0 0 24 24'>", CLIENT_PDF_ICONS[[ic]], "</svg></div>",
+      "<div class='sc-body'>",
+      "<div class='sc-k'>", e(key),
+      if (set) "<span class='sc-tag'>Filtered</span>" else "",
+      "</div>",
+      if (!is.null(chips)) paste0("<div class='sc-chips'>", chips, "</div>")
+      else paste0("<div class='sc-v'>", e(value), "</div>"),
+      "</div></div>"
+    )
+  }
+
+  # Location chips, coloured like the region groups in the table
+  ch <- scope$chips
+  rg <- scope$chip_regions
+  extra <- 0
+  if (length(ch) > 8) {
+    extra <- length(ch) - 8
+    ch <- ch[1:8]
+    rg <- rg[1:8]
+  }
+  cols <- strsplit(client_region_colors(rg), "|", fixed = TRUE)
+  chips <- paste0(vapply(seq_along(ch), function(i) {
+    paste0("<span class='chip' style='--dot:", cols[[i]][1], ";--tint:", cols[[i]][2], "'><i></i>",
+           e(ch[i]), "</span>")
+  }, character(1)), collapse = "")
+  if (extra > 0) {
+    chips <- paste0(chips, "<span class='chip chip-more'>+", extra, " more</span>")
+  }
+
+  paste0(
+    "<div class='scope'>",
+    "<div class='scope-head'><span class='scope-k'>Report scope</span>",
+    "<span class='scope-note'>",
+    if (scope$any_set) "Only opportunities matching these filters are included"
+    else "Complete pipeline &middot; no filters applied",
+    "</span></div>",
+    "<div class='scope-grid'>",
+    cell("globe", scope$loc_key, scope$loc_set, chips = chips, wide = TRUE),
+    cell("cal", "Delivery window", scope$win_set, value = scope$win_txt),
+    cell("bolt", "Capacity per opportunity", scope$mw_set, value = scope$mw_txt),
+    if (!is.null(scope$keyword)) cell("search", "Keyword", TRUE, value = scope$keyword) else "",
+    "</div></div>"
+  )
+}
+
 # df must already have the Operator column removed; `operators` is the
 # full list of names to scrub from every remaining text field.
-client_pdf_html <- function(df, operators = character(0)) {
+# `scope` (optional) describes the filters the report was built with.
+client_pdf_html <- function(df, operators = character(0), scope = NULL) {
   stopifnot(!"Operator" %in% names(df))
   e <- function(x) htmltools::htmlEscape(coalesce(as.character(x), ""))
   logo <- client_pdf_logo()
@@ -1381,7 +1535,7 @@ client_pdf_html <- function(df, operators = character(0)) {
       if (length(sub)) paste0("<span>", e(paste(sub, collapse = " · ")), "</span>") else "",
       "</td>",
       "<td><div class='cap'><div class='bar'><i style='width:",
-      max(4, round(100 * r$MW / mw_max)), "%'></i></div><b>", e(fmt_mw(r$MW)), "</b></div></td>",
+      max(4, round(100 * r$MW / mw_max)), "%'></i></div><b>", e(cap_num(r$MW)), "<small>", cap_unit(r$MW), "</small></b></div></td>",
       "</tr>"
     )
   }
@@ -1400,7 +1554,7 @@ client_pdf_html <- function(df, operators = character(0)) {
         "<tr class='rg'><td colspan='3' style='background:", col[2], "'><div class='rh'>",
         "<div class='rl'><span class='rdot' style='background:", col[1], "'></span>",
         "<span class='rt'>", e(rg), "</span></div>",
-        "<span class='rm'>", nrow(g), plural(nrow(g)), " &middot; ", e(fmt_mw(sum(g$MW))), " MW</span>",
+        "<span class='rm'>", nrow(g), plural(nrow(g)), " &middot; ", e(fmt_cap(sum(g$MW))), "</span>",
         "</div></td></tr>",
         paste0(vapply(seq_len(nrow(g)), function(i) row_html(g[i, ]), character(1)), collapse = "")
       )
@@ -1412,11 +1566,11 @@ client_pdf_html <- function(df, operators = character(0)) {
       "<div class='qstats'>",
       "<div><b>", nrow(gq), "</b><span>", trimws(plural(nrow(gq))), "</span></div>",
       "<div><b>", length(regs), "</b><span>", if (length(regs) == 1) "region" else "regions", "</span></div>",
-      "<div><b>", e(fmt_mw(sum(gq$MW))), "</b><span>MW</span></div>",
+      "<div><b>", e(cap_num(sum(gq$MW))), "</b><span>", cap_unit(sum(gq$MW)), "</span></div>",
       "</div></div>",
       "<table><colgroup><col style='width:6%'><col style='width:52%'><col style='width:42%'></colgroup>",
       "<thead><tr><th>#</th><th>Market / Location <span class='thq'>&middot; ", e(q), "</span></th>",
-      "<th>Capacity (MW)</th></tr></thead>",
+      "<th>Capacity</th></tr></thead>",
       "<tbody>", paste0(body, collapse = ""), "</tbody></table>",
       "</section>"
     )
@@ -1424,6 +1578,14 @@ client_pdf_html <- function(df, operators = character(0)) {
   
   d <- Sys.Date()
   report_date <- paste0(format(d, "%B "), as.integer(format(d, "%d")), format(d, ", %Y"))
+  
+  # Hero subtitle names the selected markets when the report is narrowed by location
+  subtitle <- if (!is.null(scope) && !is.null(scope$loc_name)) {
+    paste0("Near-term capacity coming available in ", scope$loc_name,
+           " across the ByteBridge partner network")
+  } else {
+    CLIENT_PDF_SUBTITLE
+  }
   
   kpi <- function(k, v, unit = "") {
     paste0("<div class='kpi'><div class='k'>", k, "</div><div class='v'>", v,
@@ -1434,7 +1596,7 @@ client_pdf_html <- function(df, operators = character(0)) {
     "<!doctype html><html><head><meta charset='utf-8'>",
     "<link rel='preconnect' href='https://fonts.googleapis.com'>",
     "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap' rel='stylesheet'>",
-    "<style>", CLIENT_PDF_CSS, "</style></head><body>",
+    "<style>", CLIENT_PDF_CSS, CLIENT_PDF_SCOPE_CSS, "</style></head><body>",
     
     "<div class='hero'>",
     "<div class='hero-top'>",
@@ -1444,18 +1606,20 @@ client_pdf_html <- function(df, operators = character(0)) {
     "</div>",
     "<div class='eyebrow'>", e(CLIENT_PDF_EYEBROW), "</div>",
     "<h1>", e(CLIENT_PDF_TITLE), "</h1>",
-    "<div class='sub'>", e(CLIENT_PDF_SUBTITLE), "</div>",
+    "<div class='sub'>", e(subtitle), "</div>",
     "</div>",
+    
+    client_pdf_scope_html(scope),
     
     "<div class='kpis'>",
     kpi("Opportunities", nrow(df)),
-    kpi("Upcoming capacity", e(fmt_mw(sum(df$MW))), "MW"),
+    kpi("Upcoming capacity", e(cap_num(sum(df$MW))), cap_unit(sum(df$MW))),
     kpi("Earliest availability", e(quarters[1])),
     kpi("Regions", length(regions_all)),
     "</div>",
     
     "<div class='sec'><h2>Capacity pipeline</h2>",
-    "<span>By quarter coming online, then by region &middot; all figures in MW</span></div>",
+    "<span>By quarter coming online, then by region &middot; exact figures, not rounded (1 MW = 1,000 kW)</span></div>",
     paste0(quarter_html, collapse = ""),
     
     "<div class='cta'><div class='cta-text'><b>", e(CLIENT_PDF_CTA_HEAD), "</b></div>",
@@ -1466,7 +1630,8 @@ client_pdf_html <- function(df, operators = character(0)) {
 }
 
 # Footer on every page. The logo sits on a dark pill so a white logo stays visible.
-client_pdf_footer <- function() {
+# `scope_line` (e.g. "Japan & Taiwan · 5–50 MW") keeps the context on every page.
+client_pdf_footer <- function(scope_line = "") {
   logo <- client_pdf_logo()
   brand <- if (!is.null(logo)) {
     paste0("<img src='", logo, "' style='height:11px; display:block;'>")
@@ -1480,6 +1645,11 @@ client_pdf_footer <- function() {
     " -webkit-print-color-adjust:exact; print-color-adjust:exact;'>",
     "<span style='background:#0D2742; border-radius:6px; padding:4px 8px; display:inline-flex;",
     " align-items:center; -webkit-print-color-adjust:exact;'>", brand, "</span>",
+    if (nzchar(scope_line)) paste0(
+      "<span style='flex:none; font-weight:700; color:#1D4ED8;'>",
+      htmltools::htmlEscape(scope_line), "</span>",
+      "<span style='color:#CBD5E1;'>|</span>"
+    ) else "",
     "<span style='flex:1;'>", htmltools::htmlEscape(CLIENT_PDF_DISCLAIMER), "</span>",
     "<span style='font-weight:600; color:#0D2742;'>Page <span class='pageNumber'></span>",
     " of <span class='totalPages'></span></span>",
@@ -1487,7 +1657,7 @@ client_pdf_footer <- function() {
   )
 }
 
-render_client_pdf <- function(df, out_file, operators = character(0)) {
+render_client_pdf <- function(df, out_file, operators = character(0), scope = NULL) {
   if (!requireNamespace("pagedown", quietly = TRUE)) {
     stop("The pagedown package is not installed. Run install.packages('pagedown').")
   }
@@ -1498,7 +1668,7 @@ render_client_pdf <- function(df, out_file, operators = character(0)) {
   tmp_html <- tempfile(fileext = ".html")
   tmp_pdf <- tempfile(fileext = ".pdf")
   con <- file(tmp_html, open = "w", encoding = "UTF-8")
-  writeLines(client_pdf_html(df, operators), con)
+  writeLines(client_pdf_html(df, operators, scope), con)
   close(con)
 
   pagedown::chrome_print(
@@ -1506,7 +1676,7 @@ render_client_pdf <- function(df, out_file, operators = character(0)) {
     options = list(
       displayHeaderFooter = TRUE,
       headerTemplate = "<div></div>",
-      footerTemplate = client_pdf_footer(),
+      footerTemplate = client_pdf_footer(scope$footer_line %||% ""),
       preferCSSPageSize = TRUE,
       printBackground = TRUE
     )
@@ -4493,11 +4663,106 @@ server <- function(input, output, session) {
         write.csv(file, row.names = FALSE, na = "")
     }
   )
+  
+  # ----------------------------------------------------------
+  # Client PDF report scope: describes the Upcoming Capacity
+  # filters so the PDF states exactly what it covers
+  # ----------------------------------------------------------
+  
+  client_pdf_scope <- reactive({
+    us        <- identical(input$pipeline_scope, "us")
+    states    <- input$pipeline_state_filter %||% character(0)
+    countries <- input$pipeline_country_filter %||% character(0)
+    
+    # ---- Location ----
+    if (us && length(states) > 0) {
+      chips    <- states
+      regions  <- client_region(states, rep("United States", length(states)))
+      loc_key  <- "United States \u00b7 States"
+      loc_name <- paste0("the United States (", human_list(states), ")")
+      loc_line <- paste("US:", human_list(states, 3))
+      file_tag <- paste(c("US", head(states, 3)), collapse = "-")
+    } else if (us) {
+      chips    <- "United States"
+      regions  <- "USA \u2013 Other"
+      loc_key  <- "Market"
+      loc_name <- "the United States"
+      loc_line <- "United States"
+      file_tag <- "US"
+    } else if (length(countries) > 0) {
+      chips    <- countries
+      regions  <- client_region(rep(NA_character_, length(countries)), countries)
+      loc_key  <- if (length(countries) == 1) "Market" else "Markets"
+      loc_name <- with_the(human_list(countries))
+      loc_line <- human_list(countries, 3)
+      file_tag <- paste(head(countries, 3), collapse = "-")
+    } else {
+      chips    <- "All markets"
+      regions  <- "Other"
+      loc_key  <- "Markets"
+      loc_name <- NULL
+      loc_line <- ""
+      file_tag <- "Global"
+    }
+    loc_set <- !is.null(loc_name)
+    
+    # ---- MW range (compared with the slider's full range) ----
+    mw <- input$pipeline_mw_filter
+    mx <- pipe_slider_max()
+    lo_set <- length(mw) == 2 && mw[1] > 0
+    hi_set <- length(mw) == 2 && mw[2] < mx
+    mw_txt <- if (lo_set && hi_set) {
+      paste0(fmt_cap(mw[1]), " \u2013 ", fmt_cap(mw[2]))
+    } else if (lo_set) {
+      paste0(fmt_cap(mw[1]), " and above")
+    } else if (hi_set) {
+      paste0("Up to ", fmt_cap(mw[2]))
+    } else {
+      "Any size"
+    }
+    mw_set <- lo_set || hi_set
+    
+    # ---- Quarters ----
+    qs <- input$quarter_filter %||% character(0)
+    win_set <- length(qs) > 0
+    win_txt <- if (win_set) {
+      quarter_span_txt(qs)
+    } else if (isTRUE(input$pipeline_include_past)) {
+      "All quarters on file"
+    } else {
+      paste(quarter_label(today_q()), "onward")
+    }
+    
+    # ---- Search keyword (operator names never reach the client) ----
+    kw <- str_squish(gsub('"', "", search_raw_d(), fixed = TRUE))
+    if (nzchar(kw)) {
+      kw <- scrub_operators(kw, unique(c(raw_data()$Operator, raw_pipeline()$Operator)))
+      if (!nzchar(kw)) kw <- "Curated selection"
+    } else {
+      kw <- NULL
+    }
+    
+    footer_bits <- c(loc_line,
+                     if (mw_set) mw_txt else "",
+                     if (win_set) win_txt else "")
+    
+    list(
+      chips = chips, chip_regions = regions,
+      loc_key = loc_key, loc_name = loc_name, loc_set = loc_set,
+      mw_txt = mw_txt, mw_set = mw_set,
+      win_txt = win_txt, win_set = win_set,
+      keyword = kw,
+      any_set = loc_set || mw_set || win_set || !is.null(kw),
+      footer_line = paste(footer_bits[nzchar(footer_bits)], collapse = " \u00b7 "),
+      file_tag = gsub("[^A-Za-z0-9]+", "-", file_tag)
+    )
+  })
 
   # Client PDF: same filtered rows as the table, operator names left out
   output$download_pipeline_pdf <- downloadHandler(
     filename = function() {
-      paste0("ByteBridge_Upcoming_Capacity_", format(Sys.Date(), "%Y%m%d"), ".pdf")
+      paste0("ByteBridge_Upcoming_Capacity_", client_pdf_scope()$file_tag, "_",
+             format(Sys.Date(), "%Y%m%d"), ".pdf")
     },
     content = function(file) {
       full <- pipeline_table_data()
@@ -4512,9 +4777,11 @@ server <- function(input, output, session) {
         stop("No rows to export")
       }
 
+      scope <- client_pdf_scope()
+
       tryCatch(
         withProgress(message = "Building client PDF...", value = 0.5, {
-          render_client_pdf(df, file, operators)
+          render_client_pdf(df, file, operators, scope)
         }),
         error = function(e) {
           showNotification(paste("PDF export failed:", conditionMessage(e)),
