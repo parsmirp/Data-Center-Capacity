@@ -59,6 +59,9 @@ library(readxl)
 library(tidyr)
 library(jsonlite)
 
+# Microsoft (Entra ID) sign-in; settings come from entra.env
+source("auth.R")
+
 # ---------- File locations & settings ----------
 
 DB_PATH <- "dc_data.sqlite"
@@ -2676,6 +2679,10 @@ ui <- page_sidebar(
     tags$script(HTML(APP_JS))
   ),
   
+  # Sign-in cover: shown until the user signs in with Microsoft
+  entra_head(),
+  entra_overlay(),
+  
   # ==========================================================
   # SIDEBAR
   # ==========================================================
@@ -3085,7 +3092,7 @@ base_leaflet <- function(...) {
     setMaxBounds(lng1 = -180, lat1 = -85, lng2 = 180, lat2 = 85)
 }
 
-server <- function(input, output, session) {
+main_server <- function(input, output, session) {
   
   cur <- load_current()
   raw_data <- reactiveVal(cur)
@@ -5345,5 +5352,10 @@ server <- function(input, output, session) {
 # ============================================================
 # RUN APP
 # ============================================================
+
+# Nothing in main_server (data, maps, tables, downloads) runs until sign-in succeeds
+server <- function(input, output, session) {
+  entra_gate(input, output, session, main_server)
+}
 
 shinyApp(ui, server)
