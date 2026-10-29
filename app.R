@@ -42,6 +42,12 @@
 # Client PDF: the "Report scope" panel, hero subtitle, page footer
 # and file name all reflect the Upcoming Capacity filters in use
 # (markets / states, delivery window, MW range, keyword).
+#
+# Internal PDF ("Download PDF (internal)" on the Data Centers and
+# Upcoming Capacity tabs) replaces the old CSV downloads. It keeps
+# operator names, carries the ByteBridge logo and a confidentiality
+# notice, and is drawn in the browser so it works on the published
+# site. Notice wording: EMP_PDF_COMPANY / emp_pdf_notice().
 # ============================================================
 
 # ---------- Packages ----------
@@ -61,6 +67,22 @@ library(jsonlite)
 
 # Microsoft (Entra ID) sign-in; settings come from entra.env
 source("auth.R")
+
+# ---------- Local testing without Microsoft sign-in ----------
+# Microsoft sign-in only works on the published site, so running the app
+# in RStudio gets stuck on the sign-in screen. To skip sign-in on THIS Mac,
+# run this once in the RStudio console before clicking "Run App":
+#
+#   Sys.setenv(DC_DEV_SKIP_SIGNIN = "1")
+#
+# Two safety locks keep this from ever opening the published site:
+#   1. the variable is set only in your own R session (it is not a file,
+#      so it is never uploaded when you publish), and
+#   2. even if it were set, the skip only happens when the browser is
+#      on localhost / 127.0.0.1. Anywhere else, sign-in is required.
+# To turn it off again: Sys.unsetenv("DC_DEV_SKIP_SIGNIN") or restart R.
+DEV_SKIP_SIGNIN <- identical(Sys.getenv("DC_DEV_SKIP_SIGNIN"), "1")
+if (DEV_SKIP_SIGNIN) cat("DEV MODE: Microsoft sign-in is skipped for localhost only.\n")
 
 # ---------- File locations & settings ----------
 
@@ -1688,6 +1710,930 @@ render_client_pdf <- function(df, out_file, operators = character(0), scope = NU
 }
 
 # ============================================================
+# INTERNAL (EMPLOYEE) PDF - operator names included
+#
+# Replaces the old CSV downloads on the Data Centers and Upcoming
+# Capacity tabs. The PDF is drawn in the visitor's own browser
+# (jsPDF), so the server needs no Chrome, LaTeX or extra packages.
+# That is what lets it work on the published site.
+#
+# The two PDF libraries load from a public CDN (three mirrors are
+# tried in turn). Logo: www/logo.png - make sure the www folder is
+# included when you publish.
+# ============================================================
+
+# Company name used in the legal notice. If legal wants the full
+# registered name (e.g. "ByteBridge, Inc."), change it here only.
+EMP_PDF_COMPANY <- "ByteBridge"
+
+# Who a mistaken recipient should notify
+EMP_PDF_NOTICE_CONTACT <- CLIENT_PDF_CONTACT
+
+EMP_PDF_FOOTER <- paste0(
+  "CONFIDENTIAL - Property of ", EMP_PDF_COMPANY, ". Internal use only. ",
+  "If received in error, notify ", EMP_PDF_NOTICE_CONTACT, " and delete it."
+)
+
+# Confidentiality notice printed on page 1 of every internal PDF
+emp_pdf_notice <- function() {
+  co <- EMP_PDF_COMPANY
+  list(
+    list(
+      head = "Confidential and proprietary",
+      body = paste0(
+        "This document and the information in it are the confidential and proprietary property of ",
+        co, ". It contains non-public business information, including data center capacity, ",
+        "pricing and partner details, that ", co, " keeps confidential and treats as trade secrets. ",
+        "It is provided only to ", co, " employees and authorized personnel for internal business use. ",
+        "Do not copy, forward, disclose or use it, in whole or in part, outside ", co,
+        " or for any other purpose without ", co, "'s prior written permission."
+      )
+    ),
+    list(
+      head = "If you are not the intended recipient",
+      body = paste0(
+        "This document was sent to you in error. Do not read further, copy, use or share it. ",
+        "Notify ", EMP_PDF_NOTICE_CONTACT, " immediately and permanently delete all copies, ",
+        "including printouts. Receiving this document by mistake gives you no right to use it ",
+        "and does not waive ", co, "'s confidentiality or any other rights in it."
+      )
+    ),
+    list(
+      head = "Figures are indicative",
+      body = paste0(
+        "Capacity, delivery dates, pricing and other figures are indicative, may come from third ",
+        "parties, can change without notice and are not guaranteed. This document is not an offer, ",
+        "commitment or contract by ", co, " or any data center operator."
+      )
+    ),
+    list(
+      head = "Copyright",
+      body = paste0("© ", format(Sys.Date(), "%Y"), " ", co, ". All rights reserved.")
+    )
+  )
+}
+
+EMP_PDF_JS <- r"---(
+(function() {
+  // ---------- Load the PDF libraries (tries three mirrors) ----------
+  var LIBS = [
+    { test: function() { return !!(window.jspdf && window.jspdf.jsPDF); },
+      urls: ['https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js',
+             'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
+             'https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js'] },
+    { test: function() {
+        try { return typeof new window.jspdf.jsPDF().autoTable === 'function'; }
+        catch (e) { return false; } },
+      urls: ['https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js',
+             'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js',
+             'https://unpkg.com/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js'] }
+  ];
+
+  function loadScript(url) {
+    return new Promise(function(resolve, reject) {
+      var s = document.createElement('script');
+      s.src = url; s.async = false;
+      s.onload = resolve;
+      s.onerror = function() { s.remove(); reject(new Error('blocked: ' + url)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function loadLib(lib) {
+    if (lib.test()) return Promise.resolve();
+    var i = 0;
+    function next() {
+      if (i >= lib.urls.length) return Promise.reject(new Error('The PDF library could not be loaded.'));
+      return loadScript(lib.urls[i++]).then(function() { if (!lib.test()) return next(); }, next);
+    }
+    return next();
+  }
+
+  var libsReady = null;
+  function ensureLibs() {
+    if (!libsReady) {
+      libsReady = loadLib(LIBS[0]).then(function() { return loadLib(LIBS[1]); });
+      libsReady.catch(function() { libsReady = null; });   // allow a retry later
+    }
+    return libsReady;
+  }
+
+  // ---------- Logo: sent by the server, else read from www/logo.png ----------
+  var logoCache;
+  function getLogo(p) {
+    if (p.logo) return Promise.resolve(p.logo);
+    if (logoCache !== undefined) return Promise.resolve(logoCache);
+    return fetch('logo.png')
+      .then(function(r) { if (!r.ok) throw new Error('no logo'); return r.blob(); })
+      .then(function(b) {
+        return new Promise(function(res) {
+          var fr = new FileReader();
+          fr.onload = function() { res(fr.result); };
+          fr.readAsDataURL(b);
+        });
+      })
+      .catch(function() { return null; })
+      .then(function(d) { logoCache = d; return d; });
+  }
+
+  // ---------- Colours ----------
+  var NAVY = [13, 39, 66], CYAN = [127, 227, 239], BLUE = [47, 124, 246],
+      BLUE_D = [29, 78, 216], BLUE_T = [224, 236, 255], BLUE_B = [199, 216, 251],
+      INK = [20, 34, 51], MUTED = [100, 116, 139], FAINT = [148, 163, 184],
+      LINE = [227, 233, 240], SOFT = [243, 246, 250], PALE = [185, 204, 224],
+      AMBER = [245, 158, 11], AMBER_T = [255, 247, 232], AMBER_D = [146, 64, 14],
+      WHITE = [255, 255, 255];
+
+  // The built-in PDF fonts only cover Latin-1: swap common symbols, drop the rest
+  function clean(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/[–—−]/g, '-')
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"')
+      .replace(/…/g, '...')
+      .replace(/≥/g, '>=').replace(/≤/g, '<=')
+      .replace(/[  ]/g, ' ')
+      .replace(/[^\x00-\xFF]/g, '');
+  }
+
+  function rgb(doc, fn, c) { doc[fn](c[0], c[1], c[2]); }
+  function font(doc, style, size, color) {
+    doc.setFont('helvetica', style); doc.setFontSize(size); if (color) rgb(doc, 'setTextColor', color);
+  }
+  // Cut text to fit a width, adding "..."
+  function fit(doc, t, maxW) {
+    if (doc.getTextWidth(t) <= maxW) return t;
+    while (t.length > 1 && doc.getTextWidth(t + '...') > maxW) t = t.slice(0, -1);
+    return t + '...';
+  }
+  function pill(doc, x, y, text, fill, color, size, alignRight) {
+    font(doc, 'bold', size, color);
+    var w = doc.getTextWidth(text) + 14, h = size + 7;
+    if (alignRight) x = x - w;
+    rgb(doc, 'setFillColor', fill); doc.roundedRect(x, y, w, h, h / 2, h / 2, 'F');
+    doc.text(text, x + 7, y + h / 2 + size * 0.35);
+    return w;
+  }
+
+  // ---------- Confidentiality notice (page 1, 2 x 2 grid) ----------
+  function drawNotice(doc, notice, M, CW, y) {
+    if (!notice || !notice.length) return y;
+    var pad = 14, gap = 18, colW = (CW - 2 * pad - gap) / 2;
+
+    font(doc, 'normal', 7.5);
+    var blocks = notice.map(function(n) {
+      return { head: clean(n.head).toUpperCase(), lines: doc.splitTextToSize(clean(n.body), colW) };
+    });
+    var rowH = [];
+    for (var r = 0; r < blocks.length; r += 2) {
+      var a = blocks[r].lines.length, b = blocks[r + 1] ? blocks[r + 1].lines.length : 0;
+      rowH.push(10 + Math.max(a, b) * 9.4 + 8);
+    }
+    var h = 30 + rowH.reduce(function(s, v) { return s + v; }, 0);
+
+    rgb(doc, 'setFillColor', AMBER_T); rgb(doc, 'setDrawColor', [252, 211, 77]); doc.setLineWidth(0.7);
+    doc.roundedRect(M, y, CW, h, 8, 8, 'FD');
+    rgb(doc, 'setFillColor', AMBER); doc.rect(M, y + 8, 3, h - 16, 'F');
+
+    // Shield-style mark + title
+    rgb(doc, 'setFillColor', AMBER); doc.circle(M + pad + 5, y + 15, 5, 'F');
+    font(doc, 'bold', 7, WHITE); doc.text('!', M + pad + 5, y + 17.5, { align: 'center' });
+    font(doc, 'bold', 9, AMBER_D);
+    doc.text('CONFIDENTIAL  -  PROPERTY OF BYTEBRIDGE', M + pad + 16, y + 18);
+    font(doc, 'normal', 7.5, AMBER_D);
+    doc.text('Please read before using this document', M + CW - pad, y + 18, { align: 'right' });
+
+    var yy = y + 32;
+    for (var i = 0; i < blocks.length; i += 2) {
+      [0, 1].forEach(function(c) {
+        var b = blocks[i + c]; if (!b) return;
+        var x = M + pad + c * (colW + gap);
+        font(doc, 'bold', 7, AMBER_D); doc.text(b.head, x, yy + 6);
+        font(doc, 'normal', 7.5, INK); doc.text(b.lines, x, yy + 16);
+      });
+      yy += rowH[i / 2];
+    }
+    return y + h + 14;
+  }
+
+  // ---------- Filter panel ----------
+  function layoutChips(doc, vals, maxW) {
+    font(doc, 'bold', 7.5);
+    var shown = vals.slice(0, 10).map(clean), extra = vals.length - shown.length;
+    var items = shown.map(function(t) { return { t: t, more: false }; });
+    if (extra > 0) items.push({ t: '+' + extra + ' more', more: true });
+    var x = 0, row = 0;
+    items.forEach(function(it) {
+      it.t = fit(doc, it.t, maxW - 14);
+      it.w = doc.getTextWidth(it.t) + 14;
+      if (x > 0 && x + it.w > maxW) { x = 0; row++; }
+      it.x = x; it.row = row; x += it.w + 4;
+    });
+    return { items: items, rows: items.length ? row + 1 : 0 };
+  }
+
+  // Green check mark in a circle
+  function checkBadge(doc, cx, cy, r) {
+    doc.setFillColor(16, 185, 129); doc.circle(cx, cy, r, 'F');
+    doc.setDrawColor(255, 255, 255); doc.setLineWidth(1.6);
+    doc.line(cx - r * 0.45, cy + r * 0.02, cx - r * 0.1, cy + r * 0.38);
+    doc.line(cx - r * 0.1, cy + r * 0.38, cx + r * 0.48, cy - r * 0.32);
+  }
+
+  function drawChips(doc, lay, x0, y0, style) {
+    lay.items.forEach(function(it) {
+      var cx = x0 + it.x, cy = y0 + it.row * 18;
+      if (style === 'neutral') {
+        doc.setFillColor(255, 255, 255); doc.setDrawColor(167, 243, 208); doc.setLineWidth(0.7);
+        doc.roundedRect(cx, cy, it.w, 14, 7, 7, 'FD');
+        font(doc, 'bold', 7.5, [6, 95, 70]);
+      } else {
+        rgb(doc, 'setFillColor', it.more ? SOFT : BLUE_T);
+        doc.roundedRect(cx, cy, it.w, 14, 7, 7, 'F');
+        font(doc, 'bold', 7.5, it.more ? MUTED : BLUE_D);
+      }
+      doc.text(it.t, cx + 7, cy + 9.8);
+    });
+  }
+
+  function drawFilters(doc, filters, M, CW, y, opt) {
+    filters = filters || [];
+    opt = opt || {};
+    var active = filters.filter(function(f) { return f.set; });
+    var idle = filters.filter(function(f) { return !f.set; });
+    var nSet = active.length;
+
+    // Section heading (+ status pill when filtered)
+    rgb(doc, 'setFillColor', nSet ? BLUE : [16, 185, 129]); doc.circle(M + 4, y + 6, 3, 'F');
+    font(doc, 'bold', 8.5, NAVY); doc.text(clean(opt.heading || 'REPORT FILTERS'), M + 12, y + 9);
+    if (nSet) {
+      var status = nSet + (nSet === 1 ? ' filter applied' : ' filters applied') + '  -  this is a filtered view';
+      pill(doc, M + CW, y, status.toUpperCase(), BLUE_T, BLUE_D, 6.8, true);
+    }
+    y += 20;
+
+    // ---- No filters: one clear "complete dataset" card ----
+    if (!nSet) {
+      var pad = 16, textW = 300, chipX = M + pad + 34 + textW + 20, chipW = M + CW - pad - chipX;
+      var covers = idle
+        .filter(function(f) { return !/^search$/i.test(f.label || ''); })
+        .map(function(f) { return String(f.default || 'All'); });
+      var lay = layoutChips(doc, covers, chipW);
+      var h = Math.max(54, 30 + lay.rows * 18);
+
+      doc.setFillColor(236, 253, 245); doc.setDrawColor(167, 243, 208); doc.setLineWidth(0.8);
+      doc.roundedRect(M, y, CW, h, 8, 8, 'FD');
+      checkBadge(doc, M + pad + 12, y + h / 2, 12);
+
+      font(doc, 'bold', 11, [6, 78, 59]);
+      doc.text(clean(opt.completeTitle || 'Complete dataset'), M + pad + 34, y + h / 2 - 3);
+      font(doc, 'normal', 8, [4, 120, 87]);
+      doc.text(fit(doc, clean(opt.completeText || 'No filters applied. Everything in the dashboard is included.'), textW), M + pad + 34, y + h / 2 + 10);
+
+      font(doc, 'bold', 6.5, [4, 120, 87]);
+      doc.text('COVERS', chipX, y + 13);
+      drawChips(doc, lay, chipX, y + 18, 'neutral');
+      return y + h + 16;
+    }
+
+    // ---- Filtered: one card per ACTIVE filter ----
+    var cols = nSet <= 5 ? nSet : (nSet === 6 ? 3 : 4), gap = 8, pad = 10;
+    var cw = (CW - gap * (cols - 1)) / cols;
+
+    for (var r = 0; r < active.length; r += cols) {
+      var row = active.slice(r, r + cols);
+      var lays = row.map(function(f) { return layoutChips(doc, (f.values || []).map(String), cw - 2 * pad); });
+      var rh = 0;
+      lays.forEach(function(l) { rh = Math.max(rh, 26 + l.rows * 18 + 6); });
+
+      row.forEach(function(f, i) {
+        var x = M + i * (cw + gap);
+        rgb(doc, 'setFillColor', WHITE); rgb(doc, 'setDrawColor', BLUE_B); doc.setLineWidth(0.9);
+        doc.roundedRect(x, y, cw, rh, 6, 6, 'FD');
+        rgb(doc, 'setFillColor', BLUE); doc.rect(x, y + 6, 3, rh - 12, 'F');
+
+        font(doc, 'bold', 6.8, NAVY);
+        doc.text(fit(doc, clean(f.label).toUpperCase(), cw - 2 * pad - 50), x + pad, y + 14);
+        pill(doc, x + cw - pad + 2, y + 6, 'FILTERED', BLUE_T, BLUE_D, 5.6, true);
+        drawChips(doc, lays[i], x + pad, y + 22, 'active');
+      });
+      y += rh + gap;
+    }
+
+    // Everything left untouched, in one quiet line
+    if (idle.length) {
+      var txt = idle.map(function(f) { return clean(f.label) + ': ' + clean(f.default || 'All'); }).join('   |   ');
+      font(doc, 'bold', 6.8, MUTED);
+      doc.text('NOT FILTERED', M, y + 6);
+      var lw = doc.getTextWidth('NOT FILTERED') + 8;
+      font(doc, 'normal', 7.5, FAINT);
+      var lines = doc.splitTextToSize(txt, CW - lw);
+      doc.text(lines, M + lw, y + 6);
+      y += lines.length * 10 + 4;
+    }
+    return y + 10;
+  }
+
+  // ---------- The document ----------
+  function buildPdf(p) {
+    var doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+    var W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+    var M = 32, CW = W - 2 * M, y = M;
+    var nSet = (p.filters || []).filter(function(f) { return f.set; }).length;
+
+    // ---- Header band with the ByteBridge logo ----
+    rgb(doc, 'setFillColor', NAVY); doc.rect(M, y, CW, 92, 'F');
+    rgb(doc, 'setFillColor', [25, 181, 201]); doc.rect(M, y + 88, CW, 4, 'F');
+
+    var drewLogo = false;
+    if (p.logo) {
+      try {
+        var ip = doc.getImageProperties(p.logo);
+        var lh = 26, lw = lh * ip.width / ip.height;
+        if (lw > 190) { lh = lh * 190 / lw; lw = 190; }
+        doc.addImage(p.logo, ip.fileType, M + 18, y + 13, lw, lh);
+        drewLogo = true;
+      } catch (e) { console.warn('Logo could not be drawn', e); }
+    }
+    if (!drewLogo) { font(doc, 'bold', 15, WHITE); doc.text('ByteBridge', M + 18, y + 32); }
+
+    font(doc, 'bold', 7.5, CYAN);
+    doc.text('CONFIDENTIAL  -  INTERNAL USE ONLY', M + CW - 18, y + 24, { align: 'right' });
+    font(doc, 'normal', 9, PALE);
+    doc.text(clean(p.date), M + CW - 18, y + 38, { align: 'right' });
+
+    // Filtered / complete marker in the header
+    if (nSet) pill(doc, M + CW - 18, y + 52, 'FILTERED VIEW', AMBER, [26, 18, 4], 7.5, true);
+    else      pill(doc, M + CW - 18, y + 52, 'COMPLETE DATASET', [36, 64, 98], PALE, 7.5, true);
+
+    font(doc, 'bold', 20, WHITE); doc.text(clean(p.title), M + 18, y + 62);
+    font(doc, 'normal', 9.5, PALE); doc.text(clean(p.subtitle), M + 18, y + 78);
+    y += 92 + 14;
+
+    // ---- Page 1: notice, filters, KPIs ----
+    y = drawNotice(doc, p.notice, M, CW, y);
+    y = drawFilters(doc, p.filters, M, CW, y);
+
+    var k = p.kpis || [], gap = 10;
+    var kw = (CW - gap * Math.max(k.length - 1, 0)) / Math.max(k.length, 1);
+    if (y + 46 > H - 60) { doc.addPage(); y = M; }
+    k.forEach(function(item, i) {
+      var x = M + i * (kw + gap);
+      rgb(doc, 'setFillColor', SOFT); rgb(doc, 'setDrawColor', LINE); doc.setLineWidth(0.6);
+      doc.roundedRect(x, y, kw, 46, 6, 6, 'FD');
+      rgb(doc, 'setFillColor', BLUE); doc.rect(x, y + 7, 3, 32, 'F');
+      font(doc, 'bold', 7, MUTED);
+      doc.text(clean(item.label).toUpperCase() + (nSet ? '  (FILTERED)' : ''), x + 14, y + 16);
+      font(doc, 'bold', 16, NAVY);
+      doc.text(clean(item.value), x + 14, y + 37);
+    });
+    if (k.length) y += 46 + 18;
+
+    // ---- One table per section ----
+    var colStyles = (p.colStyles && !Array.isArray(p.colStyles)) ? p.colStyles : {};
+    var head = [(p.columns || []).map(clean)];
+
+    (p.sections || []).forEach(function(s) {
+      var rows = s.rows || [];
+      if (rows.length && !Array.isArray(rows[0])) rows = [rows];
+
+      if (y > H - 120) { doc.addPage(); y = M; }
+
+      rgb(doc, 'setFillColor', NAVY); doc.rect(M, y, CW, 22, 'F');
+      font(doc, 'bold', 10.5, WHITE); doc.text(clean(s.title), M + 10, y + 15);
+      font(doc, 'normal', 8.5, PALE); doc.text(clean(s.meta), M + CW - 10, y + 15, { align: 'right' });
+
+      doc.autoTable({
+        startY: y + 22,
+        head: head,
+        body: rows.map(function(r) { return r.map(clean); }),
+        margin: { left: M, right: M, top: M, bottom: 56 },
+        theme: 'grid',
+        styles: {
+          font: 'helvetica', fontSize: 8, cellPadding: 4, textColor: INK,
+          lineColor: LINE, lineWidth: 0.5, overflow: 'linebreak', valign: 'middle'
+        },
+        headStyles: { fillColor: SOFT, textColor: MUTED, fontStyle: 'bold', fontSize: 7.5 },
+        alternateRowStyles: { fillColor: [250, 251, 253] },
+        columnStyles: colStyles,
+        showHead: 'everyPage',
+        rowPageBreak: 'avoid'
+      });
+      y = doc.lastAutoTable.finalY + 18;
+    });
+
+    // ---- Footer on every page: filter status + confidentiality ----
+    var n = doc.getNumberOfPages();
+    var fl = clean(p.filterLine);
+    for (var i = 1; i <= n; i++) {
+      doc.setPage(i);
+      var fy = H - 42;
+      if (nSet) {
+        var pw = pill(doc, M, fy - 8, 'FILTERED VIEW', BLUE_T, BLUE_D, 6.2, false);
+        font(doc, 'normal', 7.2, BLUE_D);
+        doc.text(fit(doc, fl, CW - pw - 8), M + pw + 6, fy);
+      } else {
+        font(doc, 'normal', 7.2, MUTED);
+        doc.text('Complete dataset - no filters applied', M, fy);
+      }
+      rgb(doc, 'setDrawColor', LINE); doc.setLineWidth(0.6);
+      doc.line(M, H - 30, W - M, H - 30);
+      font(doc, 'normal', 7.5, MUTED);
+      doc.text(fit(doc, clean(p.footer), CW - 70), M, H - 17);
+      font(doc, 'bold', 7.5, NAVY);
+      doc.text('Page ' + i + ' of ' + n, W - M, H - 17, { align: 'right' });
+    }
+
+    doc.save(clean(p.filename) || 'ByteBridge_Internal.pdf');
+  }
+
+  // ============================================================
+  // CLIENT PDF - operator names are removed on the server before
+  // anything reaches this code.
+  // ============================================================
+  function hex(h) {
+    h = String(h || '#94A3B8').replace('#', '');
+    return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)];
+  }
+
+  function drawLogo(doc, logo, x, y, maxH, maxW) {
+    if (!logo) return 0;
+    try {
+      var ip = doc.getImageProperties(logo);
+      var h = maxH, w = h * ip.width / ip.height;
+      if (w > maxW) { h = h * maxW / w; w = maxW; }
+      doc.addImage(logo, ip.fileType, x, y, w, h);
+      return w;
+    } catch (e) { console.warn('Logo could not be drawn', e); return 0; }
+  }
+
+  function buildClientPdf(p) {
+    var doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' });
+    var W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+    var M = 32, CW = W - 2 * M, y = M;
+    var TEAL = [25, 181, 201];
+
+    // ---- Hero ----
+    rgb(doc, 'setFillColor', [7, 24, 42]); doc.roundedRect(M, y, CW, 118, 12, 12, 'F');
+    rgb(doc, 'setFillColor', [18, 58, 99]); doc.roundedRect(M + CW * 0.55, y, CW * 0.45, 118, 12, 12, 'F');
+    rgb(doc, 'setFillColor', [13, 39, 66]); doc.rect(M + CW * 0.55, y, 24, 118, 'F');
+    rgb(doc, 'setFillColor', BLUE); doc.rect(M + 6, y + 114, CW / 2 - 6, 4, 'F');
+    rgb(doc, 'setFillColor', TEAL); doc.rect(M + CW / 2, y + 114, CW / 2 - 6, 4, 'F');
+
+    if (!drawLogo(doc, p.logo, M + 22, y + 16, 30, 200)) {
+      font(doc, 'bold', 16, WHITE); doc.text('ByteBridge', M + 22, y + 36);
+    }
+    font(doc, 'bold', 6.8, [143, 179, 217]);
+    doc.text('REPORT DATE', M + CW - 22, y + 24, { align: 'right' });
+    font(doc, 'bold', 11, WHITE);
+    doc.text(clean(p.date), M + CW - 22, y + 38, { align: 'right' });
+
+    font(doc, 'bold', 6.8, CYAN);
+    var eb = clean(p.eyebrow).toUpperCase(), ebw = doc.getTextWidth(eb) + 16;
+    rgb(doc, 'setDrawColor', CYAN); doc.setLineWidth(0.7);
+    doc.roundedRect(M + 22, y + 52, ebw, 13, 6.5, 6.5, 'S');
+    doc.text(eb, M + 30, y + 61);
+
+    font(doc, 'bold', 24, WHITE); doc.text(clean(p.title), M + 22, y + 90);
+    font(doc, 'normal', 10, PALE); doc.text(fit(doc, clean(p.subtitle), CW - 44), M + 22, y + 106);
+    y += 118 + 16;
+
+    // ---- Scope + KPIs ----
+    y = drawFilters(doc, p.filters, M, CW, y, p.filterOpt);
+
+    var k = p.kpis || [], gap = 12;
+    var kw = (CW - gap * Math.max(k.length - 1, 0)) / Math.max(k.length, 1);
+    if (y + 52 > H - 60) { doc.addPage(); y = M; }
+    k.forEach(function(item, i) {
+      var x = M + i * (kw + gap);
+      rgb(doc, 'setFillColor', WHITE); rgb(doc, 'setDrawColor', LINE); doc.setLineWidth(0.7);
+      doc.roundedRect(x, y, kw, 50, 8, 8, 'FD');
+      rgb(doc, 'setFillColor', BLUE); doc.rect(x, y + 8, 3.5, 34, 'F');
+      font(doc, 'bold', 6.8, MUTED); doc.text(clean(item.label).toUpperCase(), x + 16, y + 17);
+      font(doc, 'bold', 18, NAVY); doc.text(clean(item.value), x + 16, y + 40);
+    });
+    y += 50 + 22;
+
+    // ---- Pipeline heading ----
+    if (y > H - 150) { doc.addPage(); y = M; }
+    font(doc, 'bold', 12, NAVY); doc.text('Capacity pipeline', M + 2, y);
+    font(doc, 'normal', 7.5, MUTED);
+    doc.text('By quarter coming online, then by region  -  exact figures, not rounded (1 MW = 1,000 kW)',
+             M + CW - 2, y, { align: 'right' });
+    y += 12;
+
+    var mwMax = Math.max(Number(p.mwMax) || 1, 1);
+
+    (p.quarters || []).forEach(function(q) {
+      if (y > H - 150) { doc.addPage(); y = M; }
+
+      // Quarter band
+      rgb(doc, 'setFillColor', [7, 24, 42]); doc.roundedRect(M, y, CW, 46, 10, 10, 'F');
+      rgb(doc, 'setFillColor', [18, 58, 99]); doc.rect(M, y + 20, CW, 26, 'F');
+      rgb(doc, 'setFillColor', TEAL); doc.rect(M, y + 43, CW, 3, 'F');
+      font(doc, 'bold', 6.5, CYAN); doc.text('COMING ONLINE', M + 18, y + 16);
+      font(doc, 'bold', 19, WHITE); doc.text(clean(q.quarter), M + 18, y + 37);
+
+      var stats = [
+        [String(q.n), q.n === 1 ? 'OPPORTUNITY' : 'OPPORTUNITIES'],
+        [String(q.nRegions), q.nRegions === 1 ? 'REGION' : 'REGIONS'],
+        [clean(q.total), 'CAPACITY']
+      ];
+      var sx = M + CW - 18;
+      for (var si = stats.length - 1; si >= 0; si--) {
+        font(doc, 'bold', 6, [143, 179, 217]); var lw = doc.getTextWidth(stats[si][1]);
+        font(doc, 'bold', 14, WHITE); var vw = doc.getTextWidth(stats[si][0]);
+        var cw2 = Math.max(lw, vw);
+        doc.text(stats[si][0], sx, y + 25, { align: 'right' });
+        font(doc, 'bold', 6, [143, 179, 217]); doc.text(stats[si][1], sx, y + 36, { align: 'right' });
+        sx -= cw2 + 26;
+      }
+
+      // Rows: region header rows + site rows
+      var body = [];
+      (q.regions || []).forEach(function(r) {
+        var tint = hex(r.tint);
+        body.push([
+          { content: clean(r.name).toUpperCase(), colSpan: 2, _region: r,
+            styles: { fillColor: tint, fontStyle: 'bold', textColor: NAVY, fontSize: 8.5,
+                      cellPadding: { top: 7, bottom: 7, left: 30, right: 10 } } },
+          { content: clean(r.meta), styles: { fillColor: tint, halign: 'right', fontStyle: 'bold',
+                      textColor: [71, 85, 105], fontSize: 7.5 } }
+        ]);
+        (r.rows || []).forEach(function(s) {
+          body.push([
+            { content: String(s.n) },
+            { content: clean(s.city) + (s.sub ? '\n' + clean(s.sub) : ''), _loc: s },
+            { content: '', _cap: s }
+          ]);
+        });
+      });
+
+      doc.autoTable({
+        startY: y + 46,
+        head: [['#', 'MARKET / LOCATION  -  ' + clean(q.quarter), 'CAPACITY']],
+        body: body,
+        margin: { left: M, right: M, top: M, bottom: 56 },
+        theme: 'plain',
+        styles: { font: 'helvetica', fontSize: 8.5, cellPadding: { top: 6, bottom: 6, left: 10, right: 10 },
+                  textColor: INK, valign: 'middle', lineColor: [238, 242, 246], lineWidth: { bottom: 0.6 } },
+        headStyles: { fillColor: SOFT, textColor: MUTED, fontStyle: 'bold', fontSize: 6.8 },
+        columnStyles: {
+          0: { cellWidth: 40, halign: 'center', textColor: FAINT, fontStyle: 'bold' },
+          1: { cellWidth: CW * 0.5, minCellHeight: 30 }
+        },
+        showHead: 'everyPage',
+        rowPageBreak: 'avoid',
+        willDrawCell: function(d) {
+          if (d.section === 'body' && d.cell.raw && d.cell.raw._loc) d.cell.text = [];
+        },
+        didDrawCell: function(d) {
+          if (d.section !== 'body' || !d.cell.raw) return;
+          var c = d.cell, raw = c.raw;
+          if (raw._region) {
+            rgb(doc, 'setFillColor', hex(raw._region.dot));
+            doc.roundedRect(c.x + 12, c.y + c.height / 2 - 4.5, 9, 9, 2.5, 2.5, 'F');
+          } else if (raw._loc) {
+            font(doc, 'bold', 9.5, NAVY);
+            doc.text(fit(doc, clean(raw._loc.city), c.width - 30), c.x + 22, c.y + c.height / 2 - (raw._loc.sub ? 1.5 : -3));
+            if (raw._loc.sub) {
+              font(doc, 'normal', 7.5, MUTED);
+              doc.text(fit(doc, clean(raw._loc.sub), c.width - 30), c.x + 22, c.y + c.height / 2 + 9);
+            }
+          } else if (raw._cap) {
+            var valTxt = clean(raw._cap.cap);
+            font(doc, 'bold', 9.5, NAVY);
+            var tw = Math.max(doc.getTextWidth(valTxt), 52);
+            var bx = c.x + 12, bw = c.width - 24 - tw - 14, by = c.y + c.height / 2 - 3.5;
+            if (bw > 20) {
+              rgb(doc, 'setFillColor', [237, 242, 247]); doc.roundedRect(bx, by, bw, 7, 3.5, 3.5, 'F');
+              var fw = Math.max(bw * 0.04, bw * Math.min(Number(raw._cap.mw) / mwMax, 1));
+              rgb(doc, 'setFillColor', BLUE); doc.roundedRect(bx, by, fw * 0.55, 7, 3.5, 3.5, 'F');
+              rgb(doc, 'setFillColor', TEAL); doc.roundedRect(bx + fw * 0.45, by, fw * 0.55, 7, 3.5, 3.5, 'F');
+            }
+            font(doc, 'bold', 9.5, NAVY);
+            doc.text(valTxt, c.x + c.width - 12, c.y + c.height / 2 + 3.3, { align: 'right' });
+          }
+        }
+      });
+      y = doc.lastAutoTable.finalY + 22;
+    });
+
+    // ---- Call to action ----
+    if (y + 64 > H - 52) { doc.addPage(); y = M; }
+    rgb(doc, 'setFillColor', [13, 39, 66]); doc.roundedRect(M, y, CW, 62, 12, 12, 'F');
+    rgb(doc, 'setFillColor', [18, 58, 99]); doc.roundedRect(M + CW * 0.6, y, CW * 0.4, 62, 12, 12, 'F');
+    rgb(doc, 'setFillColor', [13, 39, 66]); doc.rect(M + CW * 0.6, y, 24, 62, 'F');
+    font(doc, 'bold', 18, WHITE); doc.text(clean(p.ctaHead), M + 22, y + 37);
+
+    font(doc, 'bold', 13, NAVY);
+    var em = clean(p.contact), bw2 = doc.getTextWidth(em) + 44, bx2 = M + CW - 20 - bw2;
+    rgb(doc, 'setFillColor', WHITE); doc.roundedRect(bx2, y + 12, bw2, 38, 19, 19, 'F');
+    font(doc, 'bold', 6.3, [25, 163, 181]); doc.text('CONTACT US', bx2 + 22, y + 25);
+    font(doc, 'bold', 13, NAVY); doc.text(em, bx2 + 22, y + 41);
+    doc.link(bx2, y + 12, bw2, 38, { url: 'mailto:' + em });
+
+    // ---- Footer on every page ----
+    var n = doc.getNumberOfPages(), fl = clean(p.footerLine), disc = clean(p.disclaimer);
+    for (var i = 1; i <= n; i++) {
+      doc.setPage(i);
+      var fy = H - 34;
+      rgb(doc, 'setFillColor', [13, 39, 66]); doc.roundedRect(M, fy, 70, 18, 6, 6, 'F');
+      if (!drawLogo(doc, p.logo, M + 8, fy + 4, 10, 54)) {
+        font(doc, 'bold', 7.5, WHITE); doc.text('ByteBridge', M + 8, fy + 12);
+      }
+      var x = M + 80;
+      if (fl) {
+        font(doc, 'bold', 7, BLUE_D); var flt = fit(doc, fl, 230); doc.text(flt, x, fy + 12);
+        x += doc.getTextWidth(flt) + 8;
+        font(doc, 'normal', 7, [203, 213, 225]); doc.text('|', x, fy + 12); x += 8;
+      }
+      font(doc, 'bold', 7.2, NAVY);
+      var pg = 'Page ' + i + ' of ' + n, pgw = doc.getTextWidth(pg);
+      doc.text(pg, M + CW, fy + 12, { align: 'right' });
+      font(doc, 'normal', 6.8, MUTED);
+      var dl = doc.splitTextToSize(disc, M + CW - pgw - 14 - x);
+      doc.text(dl.slice(0, 2), x, fy + (dl.length > 1 ? 8 : 12));
+    }
+
+    doc.save(clean(p.filename) || 'ByteBridge_Upcoming_Capacity.pdf');
+  }
+
+  window.bytebridgeBuildPdf = buildPdf;
+  window.bytebridgeBuildClientPdf = buildClientPdf;   // handy for testing in the browser console
+
+  $(function() {
+    ensureLibs().catch(function() {});   // start loading early, quietly
+
+    Shiny.addCustomMessageHandler('employee_pdf', function(p) {
+      Promise.all([ensureLibs(), getLogo(p)])
+        .then(function(r) {
+          p.logo = r[1];
+          if (p.mode === 'client') buildClientPdf(p); else buildPdf(p);
+        })
+        .catch(function(e) {
+          console.error(e);
+          alert('Could not build the PDF. Check your internet connection and try again.' +
+                (e && e.message ? '\n\n' + e.message : ''));
+        });
+    });
+  });
+})();
+)---"
+
+# ---------- Small helpers ----------
+
+# One filter card for the PDF. `values` empty = not filtered (shows `default`).
+emp_filter <- function(label, values = character(0), default = "All") {
+  values <- as.character(values)
+  values <- values[!is.na(values) & nzchar(values)]
+  list(label = label, values = as.list(values), set = length(values) > 0, default = default)
+}
+
+# One-line summary of the active filters (used in the footer of every page)
+emp_filter_line <- function(filters) {
+  set <- Filter(function(f) isTRUE(f$set), filters)
+  if (length(set) == 0) return("")
+  paste(vapply(set, function(f) paste0(f$label, ": ", human_list(unlist(f$values), 4)),
+               character(1)),
+        collapse = "  ·  ")
+}
+
+# Data frame -> plain character matrix (one JSON array per row)
+emp_rows <- function(df) {
+  m <- as.matrix(mutate(df, across(everything(), ~ coalesce(as.character(.x), ""))))
+  dimnames(m) <- NULL
+  m
+}
+
+# "20-40 MW", or "" when there is no real range
+emp_range <- function(lo, hi) {
+  s <- mw_span_txt(lo, hi)
+  ifelse(!is.na(s) & nzchar(s), paste(s, "MW"), "")
+}
+
+emp_pdf_send <- function(session, filename, title, subtitle, filters, kpis,
+                         columns, sections, col_styles = list()) {
+  logo <- client_pdf_logo()                    # www/logo.png as base64
+  if (!is.null(logo) && !grepl("^data:image/(png|jpeg)", logo)) logo <- NULL   # jsPDF can't draw SVG
+
+  d <- Sys.Date()
+
+  session$sendCustomMessage("employee_pdf", list(
+    filename   = filename,
+    title      = title,
+    subtitle   = subtitle,
+    date       = paste0(format(d, "%B "), as.integer(format(d, "%d")), format(d, ", %Y")),
+    logo       = logo,
+    footer     = EMP_PDF_FOOTER,
+    notice     = emp_pdf_notice(),
+    filters    = unname(filters),
+    filterLine = emp_filter_line(filters),
+    kpis       = unname(lapply(names(kpis), function(k) list(label = k, value = kpis[[k]]))),
+    columns    = columns,
+    sections   = unname(sections),
+    colStyles  = col_styles
+  ))
+}
+
+# ---------- Data Centers tab: one section per country (US first) ----------
+
+emp_pdf_sites <- function(session, df, filters) {
+  df <- df %>%
+    mutate(Country = coalesce(Country, "Unknown")) %>%
+    arrange(Operator, State, City_clean)
+
+  ctry <- unique(df$Country)
+  ctry <- c(intersect("United States", ctry), sort(setdiff(ctry, "United States")))
+
+  sections <- lapply(ctry, function(cn) {
+    g <- df[df$Country == cn, ]
+    list(
+      title = cn,
+      meta  = paste0(nrow(g), if (nrow(g) == 1) " site" else " sites", "  ·  ",
+                     fmt_cap(sum(g$Capacity_MW_est, na.rm = TRUE)), " est."),
+      rows  = emp_rows(g %>% transmute(
+        Operator = coalesce(Operator, "Unknown operator"),
+        City = City_clean, State, Region,
+        Capacity = Capacity,
+        Est = ifelse(is.na(Capacity_MW_est), "", fmt_cap(Capacity_MW_est)),
+        Range = emp_range(Capacity_MW_min, Capacity_MW_max),
+        Notes
+      ))
+    )
+  })
+
+  emp_pdf_send(
+    session,
+    filename = paste0("ByteBridge_Data_Centers_INTERNAL_", format(Sys.Date(), "%Y%m%d"), ".pdf"),
+    title    = "Data Center Capacity",
+    subtitle = "Current sites by country, with operator details and notes",
+    filters  = filters,
+    kpis     = list(
+      "Sites"                 = nrow(df),
+      "Operators"             = n_distinct(df$Operator),
+      "Cities"                = n_distinct(df$City_clean),
+      "Total capacity (est.)" = fmt_cap(sum(df$Capacity_MW_est, na.rm = TRUE))
+    ),
+    columns  = c("Operator", "City / Market", "State", "Region", "Capacity (sheet)",
+                 "Est. capacity", "Range", "Notes"),
+    sections = sections,
+    col_styles = list(
+      `0` = list(fontStyle = "bold", cellWidth = 105),
+      `5` = list(halign = "right"),
+      `6` = list(halign = "right"),
+      `7` = list(cellWidth = 210)
+    )
+  )
+}
+
+# ---------- Upcoming Capacity tab: one section per quarter ----------
+
+emp_pdf_pipeline <- function(session, df, filters) {
+  df <- df %>% arrange(Quarter_Date, desc(MW_available), Operator)
+  qs <- unique(df$Quarter)
+
+  sections <- lapply(qs, function(q) {
+    g <- df[df$Quarter == q, ]
+    list(
+      title = paste("Coming online", q),
+      meta  = paste0(nrow(g), if (nrow(g) == 1) " entry" else " entries", "  ·  ",
+                     fmt_cap(sum(g$MW_available, na.rm = TRUE))),
+      rows  = emp_rows(g %>% transmute(
+        Operator = coalesce(Operator, "Unknown operator"),
+        Market = City_clean, State, Country, Region,
+        MW = fmt_cap(MW_available),
+        Range = emp_range(MW_min, MW_max)
+      ))
+    )
+  })
+
+  emp_pdf_send(
+    session,
+    filename = paste0("ByteBridge_Upcoming_Capacity_INTERNAL_", format(Sys.Date(), "%Y%m%d"), ".pdf"),
+    title    = "Upcoming Data Center Capacity",
+    subtitle = "Capacity coming available by quarter, with operator names",
+    filters  = filters,
+    kpis     = list(
+      "Entries"           = nrow(df),
+      "Sites"             = nrow(distinct(df, Operator, City_clean, State, Country)),
+      "Upcoming capacity" = fmt_cap(sum(df$MW_available, na.rm = TRUE)),
+      "Earliest quarter"  = qs[1]
+    ),
+    columns  = c("Operator", "Market", "State", "Country", "Region", "MW available", "Range"),
+    sections = sections,
+    col_styles = list(
+      `0` = list(fontStyle = "bold"),
+      `5` = list(halign = "right"),
+      `6` = list(halign = "right")
+    )
+  )
+}
+
+# ============================================================
+# CLIENT PDF (browser-built) - operator names hidden
+#   Same look and grouping as the original Client PDF:
+#   quarter -> region -> sites, with capacity bars.
+#   `df` must already have the Operator column removed; `operators`
+#   is the full list of names scrubbed from every other text field.
+# ============================================================
+
+send_client_pdf <- function(session, df, operators, scope) {
+  stopifnot(!"Operator" %in% names(df))
+
+  df$Region_Client <- client_region(df$State, df$Country, df$Region)   # before scrubbing
+  df$Region_Client <- scrub_operators(df$Region_Client, operators)
+  for (col in c("City", "State", "Country", "Quarter")) {
+    df[[col]] <- scrub_operators(as.character(df[[col]]), operators)
+  }
+  df$City <- ifelse(nzchar(df$City), df$City, "Undisclosed")
+  df$MW <- coalesce(as.numeric(df$`MW Available`), 0)
+
+  quarters <- unique(df$Quarter)             # already in date order
+  plural <- function(n) if (n == 1) " opportunity" else " opportunities"
+  counter <- 0L
+
+  quarter_list <- lapply(quarters, function(q) {
+    gq <- df[df$Quarter == q, ]
+    regs <- client_region_order(gq$Region_Client)
+
+    region_list <- lapply(regs, function(rg) {
+      g <- gq[gq$Region_Client == rg, ]
+      g <- g[order(-g$MW), ]
+      col <- strsplit(client_region_colors(rg), "|", fixed = TRUE)[[1]]
+
+      rows <- lapply(seq_len(nrow(g)), function(i) {
+        counter <<- counter + 1L
+        sub <- c(g$State[i], g$Country[i])
+        sub <- sub[!is.na(sub) & nzchar(sub)]
+        list(n = counter, city = g$City[i], sub = paste(sub, collapse = " · "),
+             mw = g$MW[i], cap = fmt_cap(g$MW[i]))
+      })
+
+      list(name = rg, dot = col[1], tint = col[2],
+           meta = paste0(nrow(g), plural(nrow(g)), "  ·  ", fmt_cap(sum(g$MW))),
+           rows = rows)
+    })
+
+    list(quarter = q, n = nrow(gq), nRegions = length(regs),
+         total = fmt_cap(sum(gq$MW)), regions = region_list)
+  })
+
+  # ---- Filter cards (client wording, nothing that names an operator) ----
+  filters <- list(
+    emp_filter(if (length(scope$chips) > 1) "Markets" else "Market",
+               if (scope$loc_set) scope$chips else character(0), default = "All markets"),
+    emp_filter("Delivery window", if (scope$win_set) scope$win_txt else character(0),
+               default = scope$win_txt),
+    emp_filter("Capacity per opportunity", if (scope$mw_set) scope$mw_txt else character(0),
+               default = "Any size"),
+    emp_filter("Keyword", scope$keyword %||% character(0), default = "None")
+  )
+
+  subtitle <- if (!is.null(scope$loc_name)) {
+    paste0("Near-term capacity coming available in ", scope$loc_name,
+           " across the ByteBridge partner network")
+  } else {
+    CLIENT_PDF_SUBTITLE
+  }
+
+  logo <- client_pdf_logo()
+  if (!is.null(logo) && !grepl("^data:image/(png|jpeg)", logo)) logo <- NULL
+
+  d <- Sys.Date()
+
+  session$sendCustomMessage("employee_pdf", list(
+    mode       = "client",
+    filename   = paste0("ByteBridge_Upcoming_Capacity_", scope$file_tag, "_",
+                        format(d, "%Y%m%d"), ".pdf"),
+    eyebrow    = CLIENT_PDF_EYEBROW,
+    title      = CLIENT_PDF_TITLE,
+    subtitle   = subtitle,
+    date       = paste0(format(d, "%B "), as.integer(format(d, "%d")), format(d, ", %Y")),
+    logo       = logo,
+    filters    = unname(filters),
+    filterOpt  = list(
+      heading       = "REPORT SCOPE",
+      completeTitle = "Complete pipeline",
+      completeText  = "No filters applied. The full partner pipeline is included."
+    ),
+    kpis       = list(
+      list(label = "Opportunities", value = nrow(df)),
+      list(label = "Upcoming capacity", value = fmt_cap(sum(df$MW))),
+      list(label = "Earliest availability", value = quarters[1]),
+      list(label = "Regions", value = length(client_region_order(df$Region_Client)))
+    ),
+    mwMax      = max(df$MW, 1, na.rm = TRUE),
+    quarters   = unname(quarter_list),
+    ctaHead    = CLIENT_PDF_CTA_HEAD,
+    contact    = CLIENT_PDF_CONTACT,
+    disclaimer = CLIENT_PDF_DISCLAIMER,
+    footerLine = scope$footer_line %||% ""
+  ))
+}
+
+# ============================================================
 # UI HELPERS
 # ============================================================
 
@@ -2676,12 +3622,13 @@ ui <- page_sidebar(
     tags$style(HTML(APP_CSS)),
     tags$style(HTML(FIND_CSS)),
     tags$style(HTML(TIMELINE_CSS)),
-    tags$script(HTML(APP_JS))
+    tags$script(HTML(APP_JS)),
+    tags$script(HTML(EMP_PDF_JS))
   ),
   
   # Sign-in cover: shown until the user signs in with Microsoft
-  entra_head(),
-  entra_overlay(),
+  if (!DEV_SKIP_SIGNIN) entra_head(),
+  if (!DEV_SKIP_SIGNIN) entra_overlay(),
   
   # ==========================================================
   # SIDEBAR
@@ -2872,9 +3819,10 @@ ui <- page_sidebar(
         card_title("table", "Matching rows", "Click the (i) button on a row to read its notes"),
         DTOutput("table"),
         card_footer(
-          downloadButton(
-            "download_filtered",
-            "Download filtered results (CSV)",
+          actionButton(
+            "pdf_sites",
+            "Download PDF (internal)",
+            icon = icon("file-pdf"),
             class = "btn-outline-primary btn-sm"
           )
         )
@@ -2912,13 +3860,14 @@ ui <- page_sidebar(
                    "In chronological order"),
         DTOutput("pipeline_table"),
         card_footer(
-          downloadButton(
-            "download_pipeline",
-            "Download filtered results (CSV)",
+          actionButton(
+            "pdf_pipeline",
+            "Download PDF (internal)",
+            icon = icon("file-pdf"),
             class = "btn-outline-primary btn-sm"
           ),
-          downloadButton(
-            "download_pipeline_pdf",
+          actionButton(
+            "pdf_client",
             "Download Client PDF",
             icon = icon("file-pdf"),
             class = "btn-outline-primary btn-sm ms-2"
@@ -4505,14 +5454,48 @@ main_server <- function(input, output, session) {
     ))
   })
   
-  output$download_filtered <- downloadHandler(
-    filename = function() {
-      paste0("data_centers_filtered_", format(Sys.Date(), "%Y%m%d"), ".csv")
-    },
-    content = function(file) {
-      write.csv(table_data() %>% select(-Notes), file, row.names = FALSE, na = "")
+  # ----------------------------------------------------------
+  # Internal PDF (Data Centers tab). Built in the browser, so it
+  # works on the published site with nothing extra on the server.
+  # ----------------------------------------------------------
+
+  # Slider range as filter text, or nothing when it covers the full range
+  emp_mw_values <- function(rng, mx) {
+    if (length(rng) != 2) return(character(0))
+    lo_set <- rng[1] > 0
+    hi_set <- rng[2] < mx
+    if (lo_set && hi_set) paste0(fmt_cap(rng[1]), " – ", fmt_cap(rng[2]))
+    else if (lo_set) paste0(fmt_cap(rng[1]), " and above")
+    else if (hi_set) paste0("Up to ", fmt_cap(rng[2]))
+    else character(0)
+  }
+  emp_search_values <- function() {
+    s <- str_squish(gsub('"', "", search_raw_d(), fixed = TRUE))
+    if (nzchar(s)) paste0("“", s, "”") else character(0)
+  }
+
+  observeEvent(input$pdf_sites, {
+    df <- filtered()
+    if (nrow(df) == 0) {
+      showNotification("No sites in view, so there is nothing to export.", type = "warning")
+      return()
     }
-  )
+
+    us <- identical(input$scope, "us")
+    filters <- list(
+      emp_filter("Scope", if (us) "US only" else character(0), default = "Global"),
+      emp_filter("States", input$state_filter, default = "All states"),
+      emp_filter("Countries", if (!us) input$country_filter, default = "All countries"),
+      emp_filter("Cities", input$city_filter, default = "All cities"),
+      emp_filter("Operators", input$operator_filter, default = "All operators"),
+      emp_filter("Capacity (MW)", emp_mw_values(input$capacity_filter, cap_slider_max()),
+                 default = "Any size"),
+      emp_filter("Search", emp_search_values(), default = "None")
+    )
+
+    showNotification("Building PDF...", duration = 3)
+    emp_pdf_sites(session, df, filters)
+  })
   
   # ==========================================================
   # UPCOMING CAPACITY BY QUARTER
@@ -4660,16 +5643,35 @@ main_server <- function(input, output, session) {
     add_color_bar(dt, df, "MW Available")
   })
   
-  output$download_pipeline <- downloadHandler(
-    filename = function() {
-      paste0("upcoming_capacity_filtered_", format(Sys.Date(), "%Y%m%d"), ".csv")
-    },
-    content = function(file) {
-      pipeline_table_data() %>%
-        select(-Quarter_Order) %>%
-        write.csv(file, row.names = FALSE, na = "")
+  # Internal PDF (Upcoming Capacity tab): same rows as the table above
+  observeEvent(input$pdf_pipeline, {
+    df <- filtered_pipeline()
+    if (nrow(df) == 0) {
+      showNotification("No upcoming capacity in view, so there is nothing to export.", type = "warning")
+      return()
     }
-  )
+
+    us <- identical(input$pipeline_scope, "us")
+
+    # Quarters in date order; "Including past quarters" counts as a filter too
+    qs <- input$quarter_filter %||% character(0)
+    qs <- qs[order(quarter_to_date(qs))]
+    if (length(qs) == 0 && isTRUE(input$pipeline_include_past)) qs <- "Including past quarters"
+
+    filters <- list(
+      emp_filter("Scope", if (us) "US only" else character(0), default = "Global"),
+      if (us) emp_filter("States", input$pipeline_state_filter, default = "All states")
+      else    emp_filter("Countries", input$pipeline_country_filter, default = "All countries"),
+      emp_filter("Delivery quarters", qs,
+                 default = paste(quarter_label(today_q()), "onward")),
+      emp_filter("MW available", emp_mw_values(input$pipeline_mw_filter, pipe_slider_max()),
+                 default = "Any size"),
+      emp_filter("Search", emp_search_values(), default = "None")
+    )
+
+    showNotification("Building PDF...", duration = 3)
+    emp_pdf_pipeline(session, df, filters)
+  })
   
   # ----------------------------------------------------------
   # Client PDF report scope: describes the Upcoming Capacity
@@ -4765,40 +5767,25 @@ main_server <- function(input, output, session) {
     )
   })
 
-  # Client PDF: same filtered rows as the table, operator names left out
-  output$download_pipeline_pdf <- downloadHandler(
-    filename = function() {
-      paste0("ByteBridge_Upcoming_Capacity_", client_pdf_scope()$file_tag, "_",
-             format(Sys.Date(), "%Y%m%d"), ".pdf")
-    },
-    content = function(file) {
-      full <- pipeline_table_data()
+  # Client PDF: same filtered rows as the table, operator names left out.
+  # Built in the browser (like the internal PDF), so it works on the
+  # published site - the old version needed Chrome on the server.
+  observeEvent(input$pdf_client, {
+    full <- pipeline_table_data()
 
-      # Operator names: dropped as a column AND scrubbed from all other text
-      operators <- unique(c(raw_data()$Operator, raw_pipeline()$Operator))
-      df <- full %>% select(-Operator, -Quarter_Order, -`MW Min`, -`MW Max`)   # Region kept for grouping
+    if (nrow(full) == 0) {
+      showNotification("No upcoming capacity in view, so there is nothing to export.",
+                       type = "warning", duration = 8)
+      return()
+    }
 
-      if (nrow(df) == 0) {
-        showNotification("No upcoming capacity in view, so there is nothing to export.",
-                         type = "error", duration = 8)
-        stop("No rows to export")
-      }
+    # Operator names: dropped as a column AND scrubbed from all other text
+    operators <- unique(c(raw_data()$Operator, raw_pipeline()$Operator))
+    df <- full %>% select(-Operator, -Quarter_Order, -`MW Min`, -`MW Max`)   # Region kept for grouping
 
-      scope <- client_pdf_scope()
-
-      tryCatch(
-        withProgress(message = "Building client PDF...", value = 0.5, {
-          render_client_pdf(df, file, operators, scope)
-        }),
-        error = function(e) {
-          showNotification(paste("PDF export failed:", conditionMessage(e)),
-                           type = "error", duration = 12)
-          stop(e)
-        }
-      )
-    },
-    contentType = "application/pdf"
-  )
+    showNotification("Building client PDF...", duration = 3)
+    send_client_pdf(session, df, operators, client_pdf_scope())
+  })
   
   # ==========================================================
   # FIND CAPACITY
@@ -5355,7 +6342,18 @@ main_server <- function(input, output, session) {
 
 # Nothing in main_server (data, maps, tables, downloads) runs until sign-in succeeds
 server <- function(input, output, session) {
-  entra_gate(input, output, session, main_server)
+  host <- isolate(session$clientData$url_hostname) %||% ""
+  is_local <- host %in% c("localhost", "127.0.0.1", "::1", "[::1]")
+
+  if (DEV_SKIP_SIGNIN && is_local) {
+    # Local testing on this Mac only (see DEV_SKIP_SIGNIN near the top)
+    main_server(input, output, session)
+  } else {
+    # Everyone else, including the published site, must sign in.
+    # (If the skip variable were ever set on a server, the sign-in screen
+    # is hidden but nothing loads: it fails closed, never open.)
+    entra_gate(input, output, session, main_server)
+  }
 }
 
 shinyApp(ui, server)
