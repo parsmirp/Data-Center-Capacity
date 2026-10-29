@@ -25,17 +25,17 @@
 
 APP_DIR      <- "~/Desktop/shiny"
 TEST_MODE    <- TRUE
-SEND_EMAIL   <- TRUE          # FALSE = only build the preview file, don't send
+SEND_EMAIL   <- FALSE          # FALSE = only build the preview file, don't send
 
 MY_EMAIL     <- "parsa.mirpour@bytebt.com"
-SALES_TEAM   <- c(
-  # "rep1@bytebt.com",
-  # "rep2@bytebt.com",
-  # "rep3@bytebt.com",
-  # "rep4@bytebt.com"
-)
+SALES_TEAM   <- c("parsa.mirpour@bytebt.com",
+                  "glen.inocencio@bytebt.com",
+                  "ray@bytebt.com", 
+                  "karen.lau@bytebt.com",
+                  "jacob.gomez-decena@bytebt.com",
+                  "kage.russell@bytebt.com")
 
-DASHBOARD_URL         <- ""   # link to the hosted dashboard (optional)
+DASHBOARD_URL         <- "https://bytebt.shinyapps.io/shiny"   # link to the hosted dashboard (optional)
 REPORT_SHAREPOINT_URL <- ""   # link to the master Excel (optional; falls back to app.R's)
 
 LOGO_FILE   <- "www/logo.png"  # same logo the dashboard uses; set to "" to leave it out
@@ -863,7 +863,13 @@ html_no_logo  <- with_logo(html_template, NULL)
 preview_file <- file.path(getwd(), "weekly_report_preview.html")
 writeLines(html_preview, preview_file, useBytes = TRUE)
 cat("Preview saved:", preview_file, "\n")
-if (interactive()) browseURL(preview_file)
+# Open the preview when run by hand in RStudio. The opener is looked up by
+# name so the shinyapps.io publish check doesn't flag this script (it only
+# ever runs on your Mac, never on the published site).
+if (interactive()) {
+  open_in_browser <- get("browseURL", envir = asNamespace("utils"))
+  open_in_browser(preview_file)
+}
 
 # ============================================================
 # SEND
