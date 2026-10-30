@@ -93,6 +93,26 @@ MASTER_FILE <- "DC.xlsx"
 # Leave as "" to hide the link.
 SHAREPOINT_URL <- ""
 
+# ---------- Live data from SharePoint (published site only) ----------
+# On the published site the app downloads the master workbook straight from
+# SharePoint, so edits show up for the next visitor without republishing.
+# On this Mac nothing changes: the app keeps using DC.xlsx (OneDrive sync).
+#
+# SP_SITE_URL : the SharePoint site, as it appears in the browser address bar
+# SP_FILE_PATH: the workbook's path inside the site's "Documents" library
+SP_SITE_URL  <- "https://bytebridgetechnology.sharepoint.com/sites/DataCenterCapacity"
+SP_FILE_PATH <- "Glen and Jacob/DC_Inventory_Master_COMBINED_THANOS (9).xlsx"
+
+SP_LOCAL_FILE      <- "DC_sharepoint.xlsx"   # downloaded copy (never the OneDrive file)
+SP_CHECK_EVERY_SEC <- 60                     # at most one SharePoint check per minute
+
+# Credentials: the same Entra app registration as the sign-in, read from
+# entra.env by auth.R (ENTRA$tenant / client_id / secret). Nothing extra
+# to set up, and no secrets in this file.
+SP_SYNC <- all(nzchar(c(ENTRA$tenant, ENTRA$client_id, ENTRA$secret))) &&
+  (identical(Sys.getenv("R_CONFIG_ACTIVE"), "shinyapps") ||   # set by shinyapps.io
+   identical(Sys.getenv("DC_SP_SYNC"), "1"))                  # manual override for testing
+
 # Bump this whenever the import/parsing logic changes. It is part of the
 # import signature, so the next launch re-imports DC.xlsx even if the file
 # itself has not changed.
@@ -881,6 +901,123 @@ list_versions <- function() {
   dbReadTable(con, "dc_meta") %>% arrange(desc(version)) %>% as_tibble()
 }
 
+# ---------- Site activity: when each site's numbers last changed ----------
+# A "site" = Operator + Market + State + Country (rows for the same site,
+# e.g. several suites, are added together). Every import compares each
+# site's capacity and upcoming quarters with the previous import; when
+# they differ, that site's "last changed" date moves to today. Used by
+# the Contact DC Operators tab to flag sites worth a check-in.
+
+site_key_of <- function(op, mkt, st, ctry) {
+  n <- function(x) str_to_lower(str_squish(coalesce(as.character(x), "")))
+  paste(n(op), n(mkt), n(st), n(ctry), sep = "|")
+}
+
+site_signatures <- function(cur, pipe) {
+  cur <- as_tibble(cur)
+  if (!"City_clean" %in% names(cur)) cur$City_clean <- cur$City
+  if (!"Capacity" %in% names(cur)) cur$Capacity <- NA_character_
+  if (!"Capacity_MW_est" %in% names(cur)) cur$Capacity_MW_est <- NA_real_
+
+  s <- cur %>%
+    filter(!is.na(Operator)) %>%
+    mutate(key = site_key_of(Operator, City_clean, State, Country),
+           est = suppressWarnings(as.numeric(Capacity_MW_est))) %>%
+    group_by(key) %>%
+    summarise(cap = paste(round(sum(est, na.rm = TRUE), 3), n(),
+                          paste(sort(coalesce(as.character(Capacity), "")), collapse = "/")),
+              .groups = "drop")
+
+  pipe <- as_tibble(pipe)
+  q <- if (nrow(pipe) > 0 && all(c("Operator", "Quarter", "MW_available") %in% names(pipe))) {
+    if (!"City_clean" %in% names(pipe)) pipe$City_clean <- NA_character_
+    pipe %>%
+      filter(!is.na(Operator)) %>%
+      mutate(key = site_key_of(Operator, City_clean, State, Country),
+             mw = suppressWarnings(as.numeric(MW_available))) %>%
+      group_by(key, Quarter) %>%
+      summarise(mw = round(sum(mw, na.rm = TRUE), 3), .groups = "drop") %>%
+      arrange(key, Quarter) %>%
+      group_by(key) %>%
+      summarise(q = paste0(Quarter, "=", mw, collapse = ";"), .groups = "drop")
+  } else {
+    tibble(key = character(), q = character())
+  }
+
+  s %>% left_join(q, by = "key") %>% transmute(key, sig = paste(cap, coalesce(q, ""), sep = "#"))
+}
+
+# baseline = TRUE: first time we see the data, so we only know sites have been
+# unchanged "since at least" this date (exact = FALSE)
+update_site_activity <- function(con, cur, pipe, when, baseline = FALSE) {
+  ts <- as.character(when)
+  now_sig <- site_signatures(cur, pipe)
+
+  old <- if ("site_activity" %in% dbListTables(con)) {
+    dbReadTable(con, "site_activity") %>% as_tibble()
+  } else {
+    tibble(key = character(), sig = character(), first_seen = character(),
+           last_changed = character(), exact = logical())
+  }
+  old$exact <- as.logical(old$exact)
+
+  new <- now_sig %>%
+    left_join(old %>% rename(old_sig = sig), by = "key") %>%
+    mutate(
+      is_new  = is.na(old_sig),
+      changed = is_new | old_sig != sig,
+      first_seen   = coalesce(first_seen, ts),
+      last_changed = if_else(changed, ts, last_changed),
+      exact        = if_else(changed, !(is_new & baseline), coalesce(exact, FALSE))
+    ) %>%
+    select(key, sig, first_seen, last_changed, exact)
+
+  dbWriteTable(con, "site_activity", new, overwrite = TRUE)
+}
+
+# First use: rebuild the activity log from the saved version history
+backfill_site_activity <- function(con) {
+  tbls <- dbListTables(con)
+  meta <- if ("dc_meta" %in% tbls) dbReadTable(con, "dc_meta") %>% as_tibble() else tibble()
+  meta <- meta %>% filter(paste0("dc_history_v", version) %in% tbls) %>% arrange(version)
+
+  if (nrow(meta) == 0) {
+    if (!"dc_current" %in% tbls) return(invisible())
+    pipe <- if ("dc_pipeline_current" %in% tbls) dbReadTable(con, "dc_pipeline_current") else tibble()
+    update_site_activity(con, dbReadTable(con, "dc_current"), pipe, Sys.time(), baseline = TRUE)
+    return(invisible())
+  }
+
+  for (i in seq_len(nrow(meta))) {
+    v <- meta$version[i]
+    pt <- paste0("dc_pipeline_history_v", v)
+    pipe <- if (pt %in% tbls) dbReadTable(con, pt) else tibble()
+    update_site_activity(con, dbReadTable(con, paste0("dc_history_v", v)), pipe,
+                         meta$timestamp[i], baseline = (i == 1))
+  }
+}
+
+# Called after every saved import (see save_new_version)
+record_site_activity <- function(cur, pipe) {
+  con <- get_con()
+  on.exit(dbDisconnect(con), add = TRUE)
+  if (!"site_activity" %in% dbListTables(con)) backfill_site_activity(con)
+  else update_site_activity(con, cur, pipe, Sys.time())
+}
+
+load_site_activity <- function() {
+  con <- get_con()
+  on.exit(dbDisconnect(con), add = TRUE)
+  if (!"site_activity" %in% dbListTables(con)) backfill_site_activity(con)
+  if (!"site_activity" %in% dbListTables(con)) {
+    return(tibble(key = character(), sig = character(), first_seen = character(),
+                  last_changed = character(), exact = logical()))
+  }
+  out <- dbReadTable(con, "site_activity") %>% as_tibble()
+  out$exact <- as.logical(out$exact)
+  out
+}
+
 # ---------- Data-quality flags from the last import ----------
 
 empty_flags_tbl <- function() {
@@ -986,6 +1123,10 @@ save_new_version <- function(new_current, new_pipeline, note = "Manual update") 
   meta <- prune_history(con, meta)
   dbWriteTable(con, "dc_meta", meta, overwrite = TRUE)
   dbExecute(con, "VACUUM")
+
+  # Remember which sites changed (Contact DC Operators tab)
+  tryCatch(record_site_activity(new_current, new_pipeline),
+           error = function(e) message("Site activity not updated: ", conditionMessage(e)))
 }
 
 restore_version <- function(v) {
@@ -1088,8 +1229,87 @@ import_master_excel <- function(progress_fn = NULL) {
 }
 
 # ============================================================
+# SHAREPOINT SYNC (published site)
+#   Asks Microsoft Graph whether the workbook changed (cheap), downloads
+#   it only when it did, then runs the normal import. Any failure is
+#   logged and the app carries on with the data it already has.
+# ============================================================
+
+sp_state <- new.env()
+sp_state$token <- NULL; sp_state$token_exp <- 0
+sp_state$site_id <- NULL; sp_state$etag <- NULL; sp_state$last_check <- 0
+
+sp_token <- function() {
+  if (!is.null(sp_state$token) && Sys.time() < sp_state$token_exp - 120) return(sp_state$token)
+  resp <- httr2::request(paste0("https://login.microsoftonline.com/",
+                                ENTRA$tenant, "/oauth2/v2.0/token")) |>
+    httr2::req_body_form(
+      client_id     = ENTRA$client_id,
+      client_secret = ENTRA$secret,
+      scope         = "https://graph.microsoft.com/.default",
+      grant_type    = "client_credentials"
+    ) |>
+    httr2::req_timeout(20) |>
+    httr2::req_perform() |>
+    httr2::resp_body_json()
+  sp_state$token <- resp$access_token
+  sp_state$token_exp <- Sys.time() + as.numeric(resp$expires_in %||% 3600)
+  sp_state$token
+}
+
+sp_get <- function(path) {
+  httr2::request(paste0("https://graph.microsoft.com/v1.0", path)) |>
+    httr2::req_auth_bearer_token(sp_token()) |>
+    httr2::req_timeout(20) |>
+    httr2::req_perform() |>
+    httr2::resp_body_json()
+}
+
+sp_enc <- function(p) {
+  paste(vapply(strsplit(p, "/", fixed = TRUE)[[1]],
+               function(s) utils::URLencode(s, reserved = TRUE), character(1)),
+        collapse = "/")
+}
+
+# Returns TRUE when new data was imported
+sp_sync <- function(force = FALSE) {
+  if (!SP_SYNC) return(FALSE)
+  if (!force && as.numeric(Sys.time()) - sp_state$last_check < SP_CHECK_EVERY_SEC) return(FALSE)
+  sp_state$last_check <- as.numeric(Sys.time())
+
+  tryCatch({
+    if (is.null(sp_state$site_id)) {
+      u <- httr2::url_parse(SP_SITE_URL)
+      sp_state$site_id <- sp_get(paste0("/sites/", u$hostname, ":", sub("/$", "", u$path)))$id
+    }
+    item <- sp_get(paste0("/sites/", sp_state$site_id, "/drive/root:/", sp_enc(SP_FILE_PATH)))
+
+    if (!identical(item$eTag, sp_state$etag) || !file.exists(SP_LOCAL_FILE)) {
+      tmp <- paste0(SP_LOCAL_FILE, ".part")
+      httr2::request(item[["@microsoft.graph.downloadUrl"]]) |>
+        httr2::req_timeout(60) |>
+        httr2::req_perform(path = tmp)
+      file.rename(tmp, SP_LOCAL_FILE)
+      sp_state$etag <- item$eTag
+      cat("SharePoint: downloaded workbook (modified", item$lastModifiedDateTime, ")\n")
+    }
+    MASTER_FILE <<- SP_LOCAL_FILE
+
+    if (identical(file_signature(), get_stored_signature())) return(FALSE)
+    cat("SharePoint: workbook changed, importing...\n")
+    import_master_excel()
+    TRUE
+  }, error = function(e) {
+    cat("SharePoint sync failed (keeping current data):", conditionMessage(e), "\n")
+    FALSE
+  })
+}
+
+# ============================================================
 # STARTUP IMPORT (only if DC.xlsx changed since the last import)
 # ============================================================
+
+if (SP_SYNC) sp_sync(force = TRUE)   # published site: pull the latest workbook first
 
 if (!file.exists(MASTER_FILE)) {
   cat(MASTER_FILE, "not found at startup - using existing SQLite data only.\n")
@@ -1137,7 +1357,9 @@ if (!file.exists(MASTER_FILE)) {
 
 # ============================================================
 # CLIENT PDF (Upcoming Capacity, operator names hidden)
-#   Needs: install.packages("pagedown") + Google Chrome installed.
+#   Built in the browser by buildClientPdf() (see EMP_PDF_JS), so it
+#   needs nothing on the server. client_pdf_html() below is the older
+#   Chrome-based layout, kept only for reference; nothing calls it.
 #   Logo:  www/logo.png, shown on the dark header and footer so a
 #          light/white logo stays visible.
 # ============================================================
@@ -1680,33 +1902,6 @@ client_pdf_footer <- function(scope_line = "") {
     " of <span class='totalPages'></span></span>",
     "</div>"
   )
-}
-
-render_client_pdf <- function(df, out_file, operators = character(0), scope = NULL) {
-  if (!requireNamespace("pagedown", quietly = TRUE)) {
-    stop("The pagedown package is not installed. Run install.packages('pagedown').")
-  }
-  if (!nzchar(tryCatch(pagedown::find_chrome(), error = function(e) ""))) {
-    stop("Google Chrome was not found; it is needed to build the PDF.")
-  }
-
-  tmp_html <- tempfile(fileext = ".html")
-  tmp_pdf <- tempfile(fileext = ".pdf")
-  con <- file(tmp_html, open = "w", encoding = "UTF-8")
-  writeLines(client_pdf_html(df, operators, scope), con)
-  close(con)
-
-  pagedown::chrome_print(
-    input = tmp_html, output = tmp_pdf, wait = 2, timeout = 60, verbose = 0,
-    options = list(
-      displayHeaderFooter = TRUE,
-      headerTemplate = "<div></div>",
-      footerTemplate = client_pdf_footer(scope$footer_line %||% ""),
-      preferCSSPageSize = TRUE,
-      printBackground = TRUE
-    )
-  )
-  file.copy(tmp_pdf, out_file, overwrite = TRUE)
 }
 
 # ============================================================
@@ -2631,6 +2826,735 @@ send_client_pdf <- function(session, df, operators, scope) {
     disclaimer = CLIENT_PDF_DISCLAIMER,
     footerLine = scope$footer_line %||% ""
   ))
+}
+
+# ============================================================
+# CONTACT DC OPERATORS - helpers
+#   Emails open as drafts in the user's own Outlook (mailto:), so the
+#   dashboard never sends anything itself.
+# ============================================================
+
+CT_EMAIL_RE <- "[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"
+
+# Words that look like names but aren't (titles, teams, labels)
+CT_NOT_NAMES <- c(
+  "sales", "team", "contact", "contacts", "director", "manager", "vp", "head", "account",
+  "accounts", "colo", "colocation", "capacity", "info", "support", "channel", "business",
+  "development", "senior", "regional", "the", "hi", "email", "mr", "mrs", "ms", "dr",
+  "phone", "tel", "mobile", "cell", "ceo", "cto", "cfo", "coo", "president", "general",
+  "partner", "partners", "partnerships", "operations", "solutions", "enterprise", "global",
+  "executive", "lead", "main", "office", "primary", "secondary", "inquiries", "hello"
+)
+
+# "Jamie Crawford - jamie@x.com; sales@x.com" ->
+#   email              name
+#   jamie@x.com        Jamie
+#   sales@x.com        NA
+contact_people <- function(text) {
+  empty <- tibble(email = character(), name = character())
+  text <- paste(na.omit(as.character(text)), collapse = "\n")
+  if (!nzchar(text)) return(empty)
+
+  caps <- function(s) {
+    rest <- str_replace_all(str_remove_all(s, CT_EMAIL_RE), "[^A-Za-z' ]", " ")
+    w <- str_extract_all(rest, "\\b[A-Z][a-z']+\\b")[[1]]
+    w[!tolower(w) %in% CT_NOT_NAMES]
+  }
+  # Match a name to the address: jamie@ / jamie.crawford@ -> Jamie;
+  # cbern@ (surname) -> the word before Bern; else the first name nearby
+  pick <- function(lp, own, prev) {
+    l <- gsub("[^a-z]", "", tolower(lp))
+    for (w in c(own, prev)) if (nchar(w) >= 2 && startsWith(l, tolower(w))) return(w)
+    for (sq in list(own, prev)) {
+      for (i in seq_along(sq)) {
+        if (i > 1 && nchar(sq[i]) >= 3 && grepl(tolower(sq[i]), l, fixed = TRUE)) return(sq[i - 1])
+      }
+    }
+    if (length(own)) return(own[1])
+    m <- str_match(lp, "^([A-Za-z]{2,})[._][A-Za-z]{2,}$")[, 2]
+    if (!is.na(m) && !tolower(m) %in% CT_NOT_NAMES) return(str_to_title(m))
+    NA_character_
+  }
+
+  out <- list(); prev <- character(0)
+  for (s in unlist(strsplit(text, "[;\n,|]+"))) {
+    em <- str_extract_all(s, CT_EMAIL_RE)[[1]]
+    own <- caps(s)
+    if (length(em) == 0) { prev <- own; next }
+    for (e in em) {
+      out[[length(out) + 1]] <- tibble(email = tolower(e),
+                                       name = pick(str_extract(e, "^[^@]+"), own, prev))
+    }
+    prev <- character(0)
+  }
+  out <- bind_rows(out)
+  if (nrow(out) == 0) empty else distinct(out, email, .keep_all = TRUE)
+}
+
+ct_where <- function(market, state, country) {
+  st <- str_squish(coalesce(as.character(state), ""))
+  where <- ifelse(nzchar(st), st, str_squish(coalesce(as.character(country), "")))
+  mk <- str_squish(coalesce(as.character(market), ""))
+  ifelse(nzchar(where) & nzchar(mk), paste0(mk, ", ", where), ifelse(nzchar(mk), mk, where))
+}
+
+ct_word_count <- function(txt) {
+  txt <- str_squish(paste(txt, collapse = " "))
+  if (!nzchar(txt)) 0L else length(strsplit(txt, " ", fixed = TRUE)[[1]])
+}
+
+# rows: one row per site (Where, Market, MW, Up_lines, Quarters)
+# Returns subject, body and the word count excluding the site list.
+ct_build_email <- function(operator, rows, to, people) {
+  # Site list (not counted toward the word limit)
+  site_lines <- vapply(seq_len(nrow(rows)), function(i) {
+    r <- rows[i, ]
+    detail <- if (!is.na(r$Up_lines) && nzchar(r$Up_lines)) r$Up_lines
+              else if (!is.na(r$MW)) paste(fmt_cap(r$MW), "listed")
+              else "capacity to be confirmed"
+    paste0("- ", r$Where, ": ", detail)
+  }, character(1))
+
+  # Subject: sites with their quarters, kept to a readable length
+  parts <- vapply(seq_len(nrow(rows)), function(i) {
+    qs <- rows$Quarters[[i]]
+    if (length(qs) == 0 || all(is.na(qs))) return(rows$Market[i])
+    q_txt <- if (length(qs) > 2) paste0(qs[1], " +", length(qs) - 1) else paste(qs, collapse = ", ")
+    paste0(rows$Market[i], " (", q_txt, ")")
+  }, character(1))
+  subject <- paste0("Capacity check: ", operator, " - ")
+  shown <- character(0)
+  for (i in seq_along(parts)) {
+    trial <- paste(c(shown, parts[i]), collapse = ", ")
+    left <- length(parts) - i
+    if (length(shown) > 0 && nchar(subject) + nchar(trial) + (if (left) 12 else 0) > 150) break
+    shown <- c(shown, parts[i])
+  }
+  more <- length(parts) - length(shown)
+  subject <- paste0(subject, paste(shown, collapse = ", "),
+                    if (more > 0) paste0(" +", more, " more") else "")
+
+  # Greeting: the contact's first name when the Contacts column gives one
+  names_to <- unique(na.omit(people$name[match(tolower(to), people$email)]))
+  greet <- if (length(to) >= 3 || length(names_to) >= 3) "Hi all,"
+           else if (length(names_to) == 2) paste0("Hi ", names_to[1], " and ", names_to[2], ",")
+           else if (length(names_to) == 1) paste0("Hi ", names_to, ",")
+           else "Hi there,"
+
+  intro <- paste0(
+    "I'm reaching out from ByteBridge to keep our ", operator, " listings current for clients. ",
+    "Could you confirm whether the capacity below is still available, and share any ",
+    "changes to timing or size?"
+  )
+  ask <- paste0("If you have an updated capacity sheet, we'd love to see it, ",
+                "and we're happy to hop on a call if that's easier.")
+  sign <- "Best,"
+
+  body <- paste(c(greet, "", intro, "", site_lines, "", ask, "", sign), collapse = "\n")
+  list(subject = subject, body = body, words = ct_word_count(c(greet, intro, ask, sign)))
+}
+
+CT_WORD_LIMIT <- 75L
+
+CONTACT_JS <- r"---(
+window.dcMail = {
+  payload: function() {
+    var el = document.getElementById('contact_payload');
+    if (!el) return null;
+    try { return JSON.parse(el.getAttribute('data-mail')); } catch (e) { return null; }
+  },
+  to: function() {
+    var i = document.getElementById('contact_to');
+    return ((i && i.value) || '').split(/[;,\s]+/).filter(function(x) { return x.indexOf('@') > 0; });
+  },
+  copyText: function(t) {
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(t).catch(fallback);
+    }
+    fallback();
+    return Promise.resolve();
+  },
+  // Outlook on the web (Microsoft 365), whatever the computer's default mail app is
+  outlook: function() {
+    var p = this.payload(); if (!p) return;
+    var url = 'https://outlook.office.com/mail/deeplink/compose' +
+              '?to=' + encodeURIComponent(this.to().join(',')) +
+              '&subject=' + encodeURIComponent(p.subject) +
+              '&body=' + encodeURIComponent(p.body);
+    var w = window.open(url, '_blank', 'noopener');
+    Shiny.setInputValue('ct_opened', { n: Date.now(), via: 'outlook', blocked: !w }, { priority: 'event' });
+  },
+  // The computer's default mail app (mailto:)
+  desktop: function() {
+    var p = this.payload(); if (!p) return;
+    var to = this.to().join(',');
+    var body = p.body.replace(/\r?\n/g, '\r\n');
+    var url = 'mailto:' + to + '?subject=' + encodeURIComponent(p.subject) + '&body=' + encodeURIComponent(body);
+    var long = url.length > 1900;
+    if (long) {
+      this.copyText(p.body);
+      url = 'mailto:' + to + '?subject=' + encodeURIComponent(p.subject) +
+            '&body=' + encodeURIComponent('(The email text is on your clipboard - paste it here.)');
+    }
+    var a = document.createElement('a');
+    a.href = url; a.target = '_top'; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+    Shiny.setInputValue('ct_opened', { n: Date.now(), via: 'desktop', long: long }, { priority: 'event' });
+  },
+  copy: function() {
+    var p = this.payload(); if (!p) return;
+    this.copyText('To: ' + this.to().join(', ') + '\nSubject: ' + p.subject + '\n\n' + p.body);
+    Shiny.setInputValue('ct_copied', Date.now(), { priority: 'event' });
+  },
+  draft: function(el) {
+    Shiny.setInputValue('ct_draft_op', { op: el.getAttribute('data-op'), n: Date.now() }, { priority: 'event' });
+    var c = document.getElementById('ct_composer');
+    if (c) setTimeout(function() { c.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 60);
+  }
+};
+)---"
+
+CONTACT_CSS <- r"---(
+/* ---------- Hero ---------- */
+.ct-hero {
+  position: relative; overflow: hidden; border-radius: 18px; padding: 26px 28px;
+  margin-bottom: 18px; border: 1px solid var(--line);
+  background:
+    radial-gradient(600px 220px at 100% 0%, rgba(45,212,191,.16), transparent 60%),
+    radial-gradient(700px 260px at 0% 100%, rgba(59,130,246,.18), transparent 60%),
+    linear-gradient(135deg, #0E1726 0%, #0B1220 100%);
+  display: flex; gap: 24px; align-items: flex-end; justify-content: space-between; flex-wrap: wrap;
+}
+.ct-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700;
+  letter-spacing: .14em; text-transform: uppercase; color: #5EEAD4;
+}
+.ct-eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: #2DD4BF; box-shadow: 0 0 0 4px rgba(45,212,191,.18); }
+.ct-hero h2 { margin: 8px 0 6px; font-size: 26px; font-weight: 750; letter-spacing: -.02em; color: #F8FAFC; }
+.ct-hero p { margin: 0; max-width: 620px; color: var(--ink-2); font-size: 14px; line-height: 1.55; }
+.ct-steps { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.ct-step {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 999px;
+  background: rgba(15,22,32,.7); border: 1px solid var(--line-2); font-size: 12.5px; color: var(--ink-2);
+}
+.ct-step b {
+  width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(59,130,246,.2); color: var(--blue-2); font-size: 11.5px;
+}
+.ct-hero-side { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.ct-hero-side .ct-label { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+
+/* Segmented control (radio buttons) */
+.ct-seg .shiny-options-group { display: inline-flex; padding: 4px; gap: 2px; border-radius: 12px; background: rgba(8,12,18,.7); border: 1px solid var(--line-2); }
+.ct-seg .form-group { margin: 0; }
+.ct-seg .radio-inline, .ct-seg .form-check-inline { margin: 0 !important; padding: 0 !important; }
+.ct-seg input[type=radio] { position: absolute; opacity: 0; pointer-events: none; }
+.ct-seg label span, .ct-seg .form-check-label {
+  display: inline-block; padding: 7px 14px; border-radius: 9px; font-size: 13px; font-weight: 600;
+  color: var(--ink-3); cursor: pointer; transition: all .15s ease; user-select: none;
+}
+.ct-seg label:hover span, .ct-seg .form-check-label:hover { color: var(--ink); }
+.ct-seg input:checked + span, .ct-seg input:checked + .form-check-label {
+  background: var(--blue); color: #fff; box-shadow: 0 6px 16px rgba(59,130,246,.35);
+}
+.ct-note { font-size: 12px; color: var(--ink-3); text-align: right; max-width: 440px; line-height: 1.45; }
+.ct-note b { color: var(--ink-2); font-weight: 600; }
+
+/* ---------- Freshness bar ---------- */
+.ct-fresh-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--line); }
+.ct-fresh-bar span { display: block; height: 100%; transition: width .4s ease; }
+.ct-fresh-bar span + span { box-shadow: -2px 0 0 var(--panel); }
+.ct-legend { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 14px; }
+.ct-legend div { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--ink-2); }
+.ct-legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.ct-legend b { color: #F8FAFC; font-variant-numeric: tabular-nums; }
+.ct-legend small { color: var(--ink-3); }
+.c-fresh { background: #22C55E; } .c-due { background: #F59E0B; } .c-over { background: #EF4444; } .c-unk { background: #475569; }
+
+/* ---------- Check-in queue (operator cards) ---------- */
+.ct-queue-tools { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.ct-queue-tools .form-group { margin: 0; }
+.ct-queue-tools input { min-width: 240px; }
+.ct-queue-count { font-size: 12.5px; color: var(--ink-3); margin-left: auto; }
+.ct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.ct-card {
+  position: relative; display: flex; flex-direction: column; gap: 12px;
+  padding: 16px 16px 14px; border-radius: 14px; background: var(--panel-2);
+  border: 1px solid var(--line); transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.ct-card::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; background: #F59E0B; }
+.ct-card.is-over::before { background: #EF4444; }
+.ct-card:hover { transform: translateY(-2px); border-color: var(--line-2); box-shadow: 0 14px 30px rgba(0,0,0,.35); }
+.ct-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.ct-card-op { font-size: 15.5px; font-weight: 700; color: #F8FAFC; line-height: 1.25; }
+.ct-card-sub { font-size: 12px; color: var(--ink-3); margin-top: 3px; }
+.ct-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.ct-stat { background: rgba(8,12,18,.55); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+.ct-stat span { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
+.ct-stat b { font-size: 15px; color: #F1F5F9; font-variant-numeric: tabular-nums; }
+.ct-sites { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.ct-sites li { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--ink); }
+.ct-sites li .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-sites .more { color: var(--ink-3); font-size: 12px; }
+.ct-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 10px; border-top: 1px dashed var(--line-2); margin-top: auto; }
+.ct-who { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ct-who i { color: var(--ink-3); margin-right: 6px; }
+.ct-who.none { color: #FCD34D; }
+.ct-draft-btn {
+  flex: none; display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid rgba(59,130,246,.55); background: rgba(59,130,246,.12); color: #DBEAFE;
+  border-radius: 9px; padding: 6px 12px; font-size: 12.5px; font-weight: 650; transition: all .15s ease;
+}
+.ct-draft-btn:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
+.ct-more-wrap { text-align: center; margin-top: 16px; }
+.ct-more-wrap a { color: var(--blue-2); font-weight: 600; text-decoration: none; font-size: 13px; }
+.ct-all-clear { text-align: center; padding: 34px 16px; }
+.ct-all-clear .ic { width: 54px; height: 54px; border-radius: 16px; margin: 0 auto 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; background: rgba(34,197,94,.14); color: #4ADE80; }
+.ct-all-clear h5 { color: #F1F5F9; margin: 0 0 4px; font-weight: 700; }
+.ct-all-clear p { color: var(--ink-3); margin: 0; font-size: 13px; }
+
+.ct-days {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+  background: rgba(245,158,11,.14); color: #FCD34D; border: 1px solid rgba(245,158,11,.35);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ct-days.ct-old { background: rgba(239,68,68,.14); color: #FCA5A5; border-color: rgba(239,68,68,.4); }
+
+/* ---------- Composer ---------- */
+.ct-section-head { display: flex; align-items: baseline; gap: 12px; margin: 26px 0 12px; }
+.ct-section-head h3 { margin: 0; font-size: 19px; font-weight: 750; color: #F8FAFC; letter-spacing: -.01em; }
+.ct-section-head span { font-size: 13px; color: var(--ink-3); }
+.ct-stepnum {
+  display: inline-flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 6px 0 8px;
+}
+.ct-stepnum b { width: 22px; height: 22px; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; background: rgba(59,130,246,.18); color: var(--blue-2); font-size: 12px; letter-spacing: 0; }
+.ct-picker-head { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-3); margin: 0 0 8px; }
+.ct-picker-head a { color: var(--blue-2); text-decoration: none; font-weight: 600; }
+.ct-picker-head a:hover { color: #fff; }
+.ct-picker-head .sp { margin-left: auto; }
+#ct_sites .checkbox, #ct_sites .form-check { margin: 0; padding: 0; }
+#ct_sites label {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; box-sizing: border-box;
+  padding: 10px 12px; margin: 0 0 6px; border-radius: 11px;
+  border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; transition: all .12s ease;
+}
+#ct_sites label:hover { border-color: var(--line-2); }
+#ct_sites input[type=checkbox] { margin-top: 3px; accent-color: #3B82F6; flex: none; }
+#ct_sites label:has(input:checked) { border-color: rgba(59,130,246,.65); background: rgba(59,130,246,.09); }
+.ct-site { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.ct-site-top { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.ct-site-name { font-weight: 600; color: #F1F5F9; }
+.ct-site-meta { font-size: 12px; color: var(--ink-3); }
+.ct-site-picker-wrap { max-height: 380px; overflow-y: auto; padding-right: 4px; margin-bottom: 14px; }
+.ct-hint { font-size: 12px; color: var(--ink-3); margin-top: -6px; }
+.ct-blank { padding: 18px; border: 1px dashed var(--line-2); border-radius: 12px; color: var(--ink-3); font-size: 13px; text-align: center; margin-bottom: 14px; }
+
+/* Email window */
+.ct-window { border-radius: 14px; overflow: hidden; border: 1px solid var(--line-2); background: #0B121C; box-shadow: 0 18px 40px rgba(0,0,0,.4); }
+.ct-window-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #101A27; border-bottom: 1px solid var(--line); }
+.ct-window-bar i.d { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+.ct-window-bar .t { margin-left: 10px; font-size: 12.5px; color: var(--ink-3); font-weight: 600; }
+.ct-row { display: flex; gap: 12px; padding: 11px 18px; border-bottom: 1px solid var(--line); font-size: 13.5px; align-items: baseline; }
+.ct-k { width: 62px; flex: none; color: var(--ink-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; }
+.ct-v { color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.ct-v.ct-subject { font-weight: 650; color: #F8FAFC; }
+.ct-chip { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12.5px; background: rgba(59,130,246,.14); color: #BFDBFE; margin: 0 4px 3px 0; }
+.ct-none { color: #FCD34D; font-size: 12.5px; }
+.ct-body {
+  margin: 0; padding: 18px; white-space: pre-wrap; font-family: Inter, system-ui, sans-serif;
+  font-size: 14px; line-height: 1.65; color: #E2E8F0; background: transparent; border: 0; min-height: 220px;
+}
+.ct-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 18px; border-top: 1px solid var(--line); background: #0E1622; }
+.ct-meter { display: flex; align-items: center; gap: 10px; margin-right: auto; font-size: 12px; color: var(--ink-3); }
+.ct-meter .bar { width: 110px; height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.ct-meter .bar span { display: block; height: 100%; background: #22C55E; border-radius: 999px; }
+.ct-meter.over .bar span { background: #EF4444; }
+.ct-meter b { color: #F1F5F9; font-variant-numeric: tabular-nums; }
+.ct-btn-outlook { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; padding: 8px 16px; border-radius: 10px; box-shadow: 0 8px 20px rgba(59,130,246,.35); }
+.ct-btn-ghost { display: inline-flex; align-items: center; gap: 7px; padding: 8px 13px; border-radius: 10px; border: 1px solid var(--line-2); background: transparent; color: var(--ink); font-weight: 600; font-size: 13px; }
+.ct-btn-ghost:hover { border-color: var(--blue); color: #fff; }
+.ct-alt { width: 100%; text-align: right; font-size: 11.5px; color: var(--ink-3); margin-top: -2px; }
+.ct-alt a { color: var(--ink-2); text-decoration: underline dotted; cursor: pointer; }
+.ct-alt a:hover { color: #fff; }
+.ct-empty { padding: 60px 20px; text-align: center; color: var(--ink-3); font-size: 13.5px; }
+.ct-empty .ic { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; background: rgba(59,130,246,.12); color: var(--blue-2); }
+.ct-empty h5 { color: #F1F5F9; font-weight: 700; margin: 0 0 4px; font-size: 15px; }
+
+@media (max-width: 768px) {
+  .ct-hero { padding: 20px; }
+  .ct-hero-side { align-items: flex-start; }
+  .ct-note { text-align: left; }
+  .ct-queue-count { margin-left: 0; }
+}
+)---"
+
+# Server part of the Contact DC Operators tab (called from main_server)
+contact_server <- function(input, output, session, raw_data, raw_pipeline, today_q, refresh_trigger) {
+
+  # One row per site, with upcoming capacity, contacts and last-change date
+  ct_sites <- reactive({
+    refresh_trigger()
+    cur <- raw_data()
+    pipe <- raw_pipeline()
+    tq <- today_q()
+    act <- tryCatch(load_site_activity(), error = function(e) {
+      message("Site activity unavailable: ", conditionMessage(e)); NULL })
+
+    sites <- cur %>%
+      filter(!is.na(Operator), nzchar(str_squish(Operator))) %>%
+      mutate(key = site_key_of(Operator, City_clean, State, Country)) %>%
+      group_by(key) %>%
+      summarise(
+        Operator = first(Operator),
+        Market   = first(coalesce(City_clean, City)),
+        State    = first(State),
+        Country  = first(Country),
+        MW       = if (all(is.na(Capacity_MW_est))) NA_real_ else sum(Capacity_MW_est, na.rm = TRUE),
+        Contacts = paste(unique(na.omit(Contacts[nzchar(str_squish(coalesce(Contacts, "")))])), collapse = "\n"),
+        .groups = "drop"
+      )
+
+    up <- pipe %>%
+      filter(!is.na(Operator), !is.na(Quarter_Date), Quarter_Date >= tq,
+             coalesce(MW_available, 0) > 0) %>%
+      mutate(key = site_key_of(Operator, City_clean, State, Country)) %>%
+      group_by(key, Quarter, Quarter_Date) %>%
+      summarise(MWq = sum(MW_available), .groups = "drop") %>%
+      arrange(key, Quarter_Date) %>%
+      group_by(key) %>%
+      summarise(
+        Next_Q   = first(Quarter),
+        Up_MW    = sum(MWq),
+        Quarters = list(Quarter),
+        Up_lines = paste0(fmt_cap(MWq), " in ", Quarter, collapse = "; "),
+        .groups  = "drop"
+      )
+
+    out <- sites %>%
+      left_join(up, by = "key") %>%
+      mutate(Where = ct_where(Market, State, Country))
+    out$Quarters <- lapply(out$Quarters, function(q) if (is.null(q)) character(0) else q)
+
+    if (!is.null(act) && nrow(act) > 0) {
+      out <- out %>%
+        left_join(act %>% select(key, last_changed, exact), by = "key") %>%
+        mutate(Last = as.Date(substr(last_changed, 1, 10)))
+      tracking_start <- suppressWarnings(min(as.Date(substr(act$first_seen, 1, 10)), na.rm = TRUE))
+    } else {
+      out <- out %>% mutate(Last = as.Date(NA), exact = NA)
+      tracking_start <- as.Date(NA)
+    }
+    out$Days <- as.integer(Sys.Date() - out$Last)
+    ppl <- lapply(out$Contacts, contact_people)
+    out$n_emails <- vapply(ppl, nrow, integer(1))
+    out$first_email <- vapply(ppl, function(p) if (nrow(p)) p$email[1] else NA_character_, character(1))
+    attr(out, "tracking_start") <- if (is.finite(tracking_start)) tracking_start else as.Date(NA)
+    out
+  })
+
+  ct_threshold <- reactive(as.integer(input$ct_days %||% 90))
+
+  ct_stale <- reactive({
+    ct_sites() %>% filter(!is.na(Days), Days >= ct_threshold()) %>% arrange(desc(Days), Operator, Where)
+  })
+
+  # ---------- KPIs ----------
+  output$ct_kpi_sites   <- renderText(format(nrow(ct_stale()), big.mark = ","))
+  output$ct_kpi_ops     <- renderText(format(n_distinct(ct_stale()$Operator), big.mark = ","))
+  output$ct_kpi_mw      <- renderText({
+    mw <- sum(ct_stale()$Up_MW, na.rm = TRUE)
+    if (mw > 0) fmt_cap(mw) else "0 MW"
+  })
+  output$ct_kpi_noemail <- renderText(format(sum(ct_stale()$n_emails == 0), big.mark = ","))
+
+  output$ct_tracking_note <- renderUI({
+    start <- attr(ct_sites(), "tracking_start")
+    if (is.na(start)) return(div(class = "ct-note", "Change tracking starts with the next import."))
+    ready <- start + ct_threshold()
+    if (Sys.Date() < ready) {
+      div(class = "ct-note", "Tracking changes since ", tags$b(format(start, "%b %d, %Y")),
+          ". Unchanged sites start showing here from ", tags$b(format(ready, "%b %d")), ".")
+    } else {
+      div(class = "ct-note", "Change dates from the import history, tracked since ",
+          tags$b(format(start, "%b %d, %Y")), ".")
+    }
+  })
+
+  # ---------- Freshness across all sites ----------
+  output$ct_freshness <- renderUI({
+    s <- ct_sites()
+    th <- ct_threshold()
+    n <- nrow(s)
+    if (n == 0) return(div(class = "ct-note", "No sites loaded."))
+    k <- c(
+      fresh = sum(!is.na(s$Days) & s$Days < th),
+      due   = sum(!is.na(s$Days) & s$Days >= th & s$Days < 2 * th),
+      over  = sum(!is.na(s$Days) & s$Days >= 2 * th),
+      unk   = sum(is.na(s$Days))
+    )
+    pct <- round(100 * k / n, 1)
+    seg <- function(cls, p, lbl) if (p > 0) span(class = cls, style = paste0("width:", p, "%"), title = lbl)
+    leg <- function(cls, lbl, v, p) if (v > 0 || cls != "c-unk")
+      div(tags$i(class = cls), span(lbl), tags$b(format(v, big.mark = ",")), tags$small(paste0(round(p), "%")))
+    tagList(
+      div(class = "ct-fresh-bar",
+          seg("c-fresh", pct["fresh"], "Recently changed"),
+          seg("c-due",   pct["due"],   "Due for a check-in"),
+          seg("c-over",  pct["over"],  "Overdue"),
+          seg("c-unk",   pct["unk"],   "Not tracked yet")),
+      div(class = "ct-legend",
+          leg("c-fresh", paste0("Changed in the last ", th, " days"), k["fresh"], pct["fresh"]),
+          leg("c-due",   paste0("Due (", th, "+ days)"), k["due"], pct["due"]),
+          leg("c-over",  paste0("Overdue (", 2 * th, "+ days)"), k["over"], pct["over"]),
+          leg("c-unk",   "Not tracked yet", k["unk"], pct["unk"]))
+    )
+  })
+
+  # ---------- Check-in queue: one card per operator ----------
+  ct_show_all <- reactiveVal(FALSE)
+  observeEvent(input$ct_more, ct_show_all(!ct_show_all()))
+  ct_filter <- debounce(reactive(str_squish(input$ct_filter %||% "")), 250)
+
+  ct_queue <- reactive({
+    s <- ct_stale()
+    all_s <- ct_sites()
+    if (nrow(s) == 0) return(NULL)
+    totals <- all_s %>% count(Operator, name = "n_total")
+    s %>%
+      group_by(Operator) %>%
+      summarise(
+        n_due   = n(),
+        oldest  = max(Days),
+        up_mw   = sum(Up_MW, na.rm = TRUE),
+        email   = first(na.omit(first_email)),
+        n_mail  = sum(n_emails),
+        sites   = list(tibble(Where = Where, Days = Days)),
+        .groups = "drop"
+      ) %>%
+      left_join(totals, by = "Operator") %>%
+      arrange(desc(oldest), desc(n_due))
+  })
+
+  output$ct_queue_count <- renderText({
+    q <- ct_queue()
+    if (is.null(q)) "" else paste0(nrow(q), if (nrow(q) == 1) " operator" else " operators",
+                                   " · ", sum(q$n_due), " sites")
+  })
+
+  output$ct_queue <- renderUI({
+    q <- ct_queue()
+    th <- ct_threshold()
+    if (is.null(q)) {
+      return(div(class = "ct-all-clear",
+                 div(class = "ic", icon("circle-check")),
+                 tags$h5("All caught up"),
+                 tags$p(paste0("Every site has changed in the last ", th, " days."))))
+    }
+    f <- ct_filter()
+    if (nzchar(f)) q <- q %>% filter(str_detect(str_to_lower(Operator), fixed(str_to_lower(f))))
+    if (nrow(q) == 0) return(div(class = "ct-blank", "No operator matches that search."))
+
+    limit <- 9
+    shown <- if (ct_show_all() || nrow(q) <= limit) q else head(q, limit)
+
+    cards <- lapply(seq_len(nrow(shown)), function(i) {
+      r <- shown[i, ]
+      st <- r$sites[[1]] %>% arrange(desc(Days))
+      top <- head(st, 3)
+      div(
+        class = paste("ct-card", if (r$oldest >= 2 * th) "is-over"),
+        div(class = "ct-card-head",
+            div(div(class = "ct-card-op", r$Operator),
+                div(class = "ct-card-sub", paste0(r$n_due, " of ", r$n_total,
+                                                  if (r$n_total == 1) " site" else " sites", " due"))),
+            span(class = paste("ct-days", if (r$oldest >= 2 * th) "ct-old"), paste(r$oldest, "days"))),
+        div(class = "ct-stats",
+            div(class = "ct-stat", span("Sites due"), tags$b(r$n_due)),
+            div(class = "ct-stat", span("Oldest"), tags$b(paste0(r$oldest, "d"))),
+            div(class = "ct-stat", span("Upcoming"), tags$b(if (r$up_mw > 0) fmt_cap(r$up_mw) else "–"))),
+        tags$ul(class = "ct-sites",
+                lapply(seq_len(nrow(top)), function(j) {
+                  tags$li(span(class = "nm", top$Where[j]),
+                          span(class = paste("ct-days", if (top$Days[j] >= 2 * th) "ct-old"),
+                               paste0(top$Days[j], "d")))
+                }),
+                if (nrow(st) > 3) tags$li(span(class = "more", paste0("+", nrow(st) - 3, " more")))),
+        div(class = "ct-card-foot",
+            if (!is.na(r$email)) div(class = "ct-who", icon("at"), r$email)
+            else div(class = "ct-who none", icon("triangle-exclamation"), "No email in the sheet"),
+            tags$button(type = "button", class = "ct-draft-btn", `data-op` = r$Operator,
+                        onclick = "dcMail.draft(this)", icon("pen-to-square"), "Draft email"))
+      )
+    })
+
+    tagList(
+      div(class = "ct-grid", cards),
+      if (nrow(q) > limit) div(class = "ct-more-wrap",
+        actionLink("ct_more", if (ct_show_all()) "Show fewer" else paste("Show all", nrow(q), "operators")))
+    )
+  })
+
+  # ---------- Composer: operator & sites ----------
+  observe({
+    s <- ct_sites()
+    stale_ops <- ct_stale() %>% count(Operator, name = "due")
+    ops <- s %>% count(Operator, name = "n") %>% left_join(stale_ops, by = "Operator") %>%
+      mutate(due = coalesce(due, 0L)) %>% arrange(desc(due), Operator)
+    labels <- paste0(ops$Operator, "  —  ", ops$n, if_else(ops$n == 1, " site", " sites"),
+                     if_else(ops$due > 0, paste0(", ", ops$due, " due"), ""))
+    sel <- isolate(input$ct_operator)
+    updateSelectizeInput(session, "ct_operator", choices = setNames(ops$Operator, labels),
+                         selected = if (!is.null(sel) && sel %in% ops$Operator) sel else character(0))
+  })
+
+  ct_op_sites <- reactive({
+    req(input$ct_operator)
+    ct_sites() %>% filter(Operator == input$ct_operator) %>%
+      arrange(desc(coalesce(Days, 0L) >= ct_threshold()), is.na(Next_Q), Where)
+  })
+
+  ct_default_keys <- function(rows) {
+    due <- rows$key[!is.na(rows$Days) & rows$Days >= ct_threshold()]
+    if (length(due)) due else if (nrow(rows) <= 6) rows$key else character(0)
+  }
+
+  output$ct_site_picker <- renderUI({
+    if (!isTruthy(input$ct_operator)) {
+      return(div(class = "ct-blank", "Choose an operator above to see its sites."))
+    }
+    rows <- ct_op_sites()
+    th <- ct_threshold()
+    labels <- lapply(seq_len(nrow(rows)), function(i) {
+      r <- rows[i, ]
+      meta <- if (!is.na(r$Up_lines)) r$Up_lines else if (!is.na(r$MW)) paste(fmt_cap(r$MW), "listed") else "No capacity figure"
+      div(class = "ct-site",
+          div(class = "ct-site-top",
+              span(class = "ct-site-name", r$Where),
+              if (!is.na(r$Days) && r$Days >= th)
+                span(class = paste("ct-days", if (r$Days >= 2 * th) "ct-old"), paste0(r$Days, "d"))),
+          span(class = "ct-site-meta", meta))
+    })
+    tagList(
+      div(class = "ct-picker-head",
+          span(paste0(nrow(rows), if (nrow(rows) == 1) " site" else " sites")),
+          span(class = "sp"),
+          actionLink("ct_sel_due", "Due"), span("·"),
+          actionLink("ct_sel_all", "All"), span("·"),
+          actionLink("ct_sel_none", "None")),
+      div(class = "ct-site-picker-wrap",
+          checkboxGroupInput("ct_sites", NULL, choiceNames = labels, choiceValues = rows$key,
+                             selected = ct_default_keys(rows), width = "100%"))
+    )
+  })
+
+  observeEvent(input$ct_sel_due,  updateCheckboxGroupInput(session, "ct_sites", selected = ct_default_keys(ct_op_sites())))
+  observeEvent(input$ct_sel_all,  updateCheckboxGroupInput(session, "ct_sites", selected = ct_op_sites()$key))
+  observeEvent(input$ct_sel_none, updateCheckboxGroupInput(session, "ct_sites", selected = character(0)))
+
+  # "Draft email" on an operator card: load that operator with its due sites ticked
+  observeEvent(input$ct_draft_op, {
+    op <- input$ct_draft_op$op
+    if (identical(op, input$ct_operator)) {
+      updateCheckboxGroupInput(session, "ct_sites", selected = ct_default_keys(ct_op_sites()))
+    } else {
+      updateSelectizeInput(session, "ct_operator", selected = op)
+    }
+  })
+
+  ct_chosen <- reactive({
+    rows <- ct_op_sites()
+    rows[rows$key %in% (input$ct_sites %||% character(0)), , drop = FALSE]
+  })
+
+  ct_people <- reactive({
+    req(input$ct_operator)
+    contact_people(ct_op_sites()$Contacts)
+  })
+
+  # Fill "Send to" from the chosen sites' contacts (or the operator's, if none)
+  observeEvent(list(input$ct_operator, input$ct_sites), ignoreNULL = FALSE, {
+    if (!isTruthy(input$ct_operator)) return()
+    em <- contact_people(ct_chosen()$Contacts)$email
+    if (length(em) == 0) em <- ct_people()$email
+    updateTextInput(session, "contact_to", value = paste(em, collapse = ", "))
+  })
+
+  ct_to <- debounce(reactive({
+    x <- str_split(input$contact_to %||% "", "[;,\\s]+")[[1]]
+    x[str_detect(x, "@")]
+  }), 400)
+
+  # ---------- Preview ----------
+  output$ct_preview <- renderUI({
+    win <- function(...) div(class = "ct-window",
+      div(class = "ct-window-bar",
+          tags$i(class = "d", style = "background:#EF4444"),
+          tags$i(class = "d", style = "background:#F59E0B"),
+          tags$i(class = "d", style = "background:#22C55E"),
+          span(class = "t", "New message")),
+      ...)
+
+    if (!isTruthy(input$ct_operator)) {
+      return(win(div(class = "ct-empty", div(class = "ic", icon("envelope-open-text")),
+                     tags$h5("Your email builds itself here"),
+                     "Pick an operator, or click Draft email on a card above.")))
+    }
+    rows <- ct_chosen()
+    if (nrow(rows) == 0) {
+      return(win(div(class = "ct-empty", div(class = "ic", icon("list-check")),
+                     tags$h5("No sites selected"),
+                     "Tick at least one site to mention in the email.")))
+    }
+    to <- ct_to()
+    mail <- ct_build_email(input$ct_operator, rows, to, ct_people())
+    pct <- min(100, round(100 * mail$words / CT_WORD_LIMIT))
+
+    win(
+      div(class = "ct-row", span(class = "ct-k", "To"),
+          span(class = "ct-v",
+               if (length(to)) lapply(to, function(e) span(class = "ct-chip", e))
+               else span(class = "ct-none", icon("triangle-exclamation"),
+                         " No email in the sheet. Add one under Send to, or in Outlook."))),
+      div(class = "ct-row", span(class = "ct-k", "Subject"), span(class = "ct-v ct-subject", mail$subject)),
+      tags$pre(class = "ct-body", mail$body),
+      div(class = "ct-foot",
+          div(class = paste("ct-meter", if (mail$words > CT_WORD_LIMIT) "over"),
+              div(class = "bar", span(style = paste0("width:", pct, "%"))),
+              span(tags$b(mail$words), paste0(" / ", CT_WORD_LIMIT, " words"),
+                   span(style = "opacity:.75", paste0("  +  ", nrow(rows), if (nrow(rows) == 1) " site" else " sites")))),
+          tags$button(type = "button", class = "ct-btn-ghost", onclick = "dcMail.copy()",
+                      icon("copy"), "Copy"),
+          tags$button(type = "button", class = "btn btn-primary ct-btn-outlook", onclick = "dcMail.outlook()",
+                      icon("envelope-open-text"), "Open in Outlook"),
+          div(class = "ct-alt", "Prefer the Outlook desktop app? ",
+              tags$a(onclick = "dcMail.desktop()", "Open in my default mail app"))),
+      div(id = "contact_payload", style = "display:none",
+          `data-mail` = as.character(jsonlite::toJSON(
+            list(subject = mail$subject, body = mail$body), auto_unbox = TRUE)))
+    )
+  })
+
+  observeEvent(input$ct_opened, {
+    o <- input$ct_opened
+    if (identical(o$via, "outlook") && isTRUE(o$blocked)) {
+      showNotification("Your browser blocked the new tab. Allow pop-ups for this site and try again.",
+                       type = "warning", duration = 8)
+    } else if (isTRUE(o$long)) {
+      showNotification("Long email: the text is on your clipboard. Paste it into the draft.",
+                       type = "warning", duration = 8)
+    } else {
+      showNotification("Draft opened. Review it and press Send in Outlook.", duration = 5)
+    }
+  })
+  observeEvent(input$ct_copied, showNotification("Email copied to the clipboard.", duration = 3))
 }
 
 # ============================================================
@@ -3623,7 +4547,9 @@ ui <- page_sidebar(
     tags$style(HTML(FIND_CSS)),
     tags$style(HTML(TIMELINE_CSS)),
     tags$script(HTML(APP_JS)),
-    tags$script(HTML(EMP_PDF_JS))
+    tags$script(HTML(EMP_PDF_JS)),
+    tags$script(HTML(CONTACT_JS)),
+    tags$style(HTML(CONTACT_CSS))
   ),
   
   # Sign-in cover: shown until the user signs in with Microsoft
@@ -3944,6 +4870,79 @@ ui <- page_sidebar(
     ),
     
     # --------------------------------------------------------
+    # CONTACT DC OPERATORS
+    #   Check-in reminders for sites whose numbers haven't changed,
+    #   plus a quick capacity-check email that opens in Outlook.
+    # --------------------------------------------------------
+    nav_panel(
+      "Contact DC Operators",
+      
+      div(
+        class = "ct-hero",
+        div(
+          div(class = "ct-eyebrow", span(class = "dot"), "Operator outreach"),
+          tags$h2("Keep capacity data fresh"),
+          tags$p("Spot listings that have gone quiet, then ask the operator to confirm in a couple of clicks. ",
+                 "Emails open as drafts in your own Outlook, so nothing is sent from the dashboard."),
+          div(class = "ct-steps",
+              span(class = "ct-step", tags$b("1"), "Find quiet sites"),
+              span(class = "ct-step", tags$b("2"), "Pick what to ask about"),
+              span(class = "ct-step", tags$b("3"), "Review and send in Outlook"))
+        ),
+        div(
+          class = "ct-hero-side",
+          span(class = "ct-label", "Flag sites unchanged for"),
+          div(class = "ct-seg",
+              radioButtons("ct_days", NULL, inline = TRUE, selected = 90,
+                           choices = c("60 days" = 60, "90 days" = 90, "120 days" = 120, "180 days" = 180))),
+          uiOutput("ct_tracking_note")
+        )
+      ),
+      
+      layout_columns(
+        col_widths = c(3, 3, 3, 3),
+        kpi("yellow", "clock-rotate-left", "Sites due for a check-in", "ct_kpi_sites"),
+        kpi("violet", "building", "Operators to contact", "ct_kpi_ops"),
+        kpi("blue", "bolt", "Upcoming capacity at those sites", "ct_kpi_mw"),
+        kpi("teal", "address-book", "Due sites with no email", "ct_kpi_noemail")
+      ),
+      
+      card(
+        card_title("gauge-high", "Data freshness", "Every site, by how recently its numbers changed"),
+        uiOutput("ct_freshness")
+      ),
+      
+      card(
+        card_title("clock-rotate-left", "Check-in queue", "Operators with quiet sites, most overdue first"),
+        div(class = "ct-queue-tools",
+            textInput("ct_filter", NULL, placeholder = "Search operators..."),
+            span(class = "ct-queue-count", textOutput("ct_queue_count", inline = TRUE))),
+        uiOutput("ct_queue")
+      ),
+      
+      div(
+        id = "ct_composer",
+        div(class = "ct-section-head", tags$h3("Quick capacity check"),
+            span("Choose an operator and the sites to mention. The email writes itself.")),
+        layout_columns(
+          col_widths = c(5, 7),
+          card(
+            card_title("list-check", "Build the email"),
+            div(class = "ct-stepnum", tags$b("1"), "Operator"),
+            selectizeInput("ct_operator", NULL, choices = NULL, width = "100%",
+                           options = list(placeholder = "Choose an operator...")),
+            div(class = "ct-stepnum", tags$b("2"), "Sites to mention"),
+            uiOutput("ct_site_picker"),
+            div(class = "ct-stepnum", tags$b("3"), "Send to"),
+            textInput("contact_to", NULL, width = "100%", placeholder = "name@operator.com"),
+            div(class = "ct-hint", "Filled from the Contacts column. Separate addresses with commas.")
+          ),
+          div(uiOutput("ct_preview"))
+        )
+      )
+    ),
+    
+    # --------------------------------------------------------
     # VERSION HISTORY
     # --------------------------------------------------------
     nav_panel(
@@ -4042,7 +5041,12 @@ base_leaflet <- function(...) {
 }
 
 main_server <- function(input, output, session) {
-  
+
+  # Published site: pick up SharePoint edits made since the last visitor
+  if (sp_sync()) {
+    showNotification("Loaded the latest data from SharePoint.", duration = 4)
+  }
+
   cur <- load_current()
   raw_data <- reactiveVal(cur)
   raw_pipeline <- reactiveVal(load_current_pipeline())
@@ -4087,6 +5091,9 @@ main_server <- function(input, output, session) {
   }
   
   quarter_choices <- reactive(quarters_of(pipeline_base()))
+  
+  # Contact DC Operators tab
+  contact_server(input, output, session, raw_data, raw_pipeline, today_q, refresh_trigger)
   
   # ----------------------------------------------------------
   # Header: "last updated" pill + data-quality pill
