@@ -14,7 +14,7 @@
 # 3. Launch the app - it imports DC.xlsx automatically at startup
 #    (only if the file changed since the last import)
 # 4. (Optional) "Refresh from DC.xlsx" in Version History if the
-#    master sheet changes while the app is already running
+#    master sheet changes while the app is already runningrack
 # 5. Republish the app so the hosted version gets the new data
 #
 # If the master file is ever renamed on SharePoint, recreate the link
@@ -564,7 +564,18 @@ initialize_database()
 
 clean_master_df <- function(raw) {
   names(raw) <- str_squish(names(raw))
-  
+
+  # ---- Accept common spellings of the pricing headers ----
+  header_alias <- c(
+    "Price ($/kWh)" = "Price ($/kW)", "Price per kW" = "Price ($/kW)",
+    "Utility Rate" = "Utility Rate ($/kWh)", "Utility Rate ($/kW)" = "Utility Rate ($/kWh)"
+  )
+  for (a in names(header_alias)) {
+    if (a %in% names(raw) && !header_alias[[a]] %in% names(raw)) {
+      names(raw)[names(raw) == a] <- header_alias[[a]]
+    }
+  }
+
   # ---- Quarter columns come from the sheet itself, sorted by date ----
   q_idx <- str_detect(names(raw), regex(QUARTER_PATTERN, ignore_case = TRUE))
   names(raw)[q_idx] <- str_to_upper(names(raw)[q_idx])
@@ -1358,8 +1369,7 @@ if (!file.exists(MASTER_FILE)) {
 # ============================================================
 # CLIENT PDF (Upcoming Capacity, operator names hidden)
 #   Built in the browser by buildClientPdf() (see EMP_PDF_JS), so it
-#   needs nothing on the server. client_pdf_html() below is the older
-#   Chrome-based layout, kept only for reference; nothing calls it.
+#   needs nothing on the server (see send_client_pdf() below).
 #   Logo:  www/logo.png, shown on the dark header and footer so a
 #          light/white logo stays visible.
 # ============================================================
@@ -1385,163 +1395,6 @@ client_pdf_logo <- function() {
   paste0("data:", mime, ";base64,",
          jsonlite::base64_enc(readBin(f, "raw", file.info(f)$size)))
 }
-
-CLIENT_PDF_CSS <- "
-@page { size: Letter landscape; margin: 0.4in 0.45in 0.7in 0.45in; }
-* { box-sizing: border-box; }
-html, body {
-  margin: 0; padding: 0; color: #142233;
-  font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-  font-feature-settings: 'tnum' 1;
-  -webkit-print-color-adjust: exact; print-color-adjust: exact;
-}
-
-/* ---------- Hero ---------- */
-.hero {
-  position: relative; overflow: hidden; border-radius: 16px;
-  padding: 22px 28px 24px; color: #fff;
-  background:
-    radial-gradient(520px 260px at 92% -20%, rgba(25,181,201,.35), transparent 60%),
-    radial-gradient(420px 240px at 70% 130%, rgba(47,124,246,.30), transparent 60%),
-    linear-gradient(120deg, #07182A 0%, #0D2742 55%, #123A63 100%);
-}
-.hero::after {
-  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 4px;
-  background: linear-gradient(90deg, #2F7CF6, #19B5C9);
-}
-.hero-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
-.hero-logo { height: 38px; display: block; }
-.wordmark { font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
-.hero-date { text-align: right; font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: #8FB3D9; }
-.hero-date b { display: block; margin-top: 3px; font-size: 13px; letter-spacing: 0; text-transform: none; color: #fff; font-weight: 600; }
-.eyebrow {
-  display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase;
-  color: #7FE3EF; border: 1px solid rgba(127,227,239,.45); border-radius: 999px; padding: 3px 10px; margin-bottom: 10px;
-}
-.hero h1 { margin: 0; font-size: 30px; font-weight: 800; letter-spacing: -.02em; line-height: 1.1; }
-.hero .sub { margin-top: 6px; font-size: 12.5px; color: #B9CCE0; }
-
-/* ---------- KPI cards ---------- */
-.kpis { display: flex; gap: 12px; margin: 16px 0 20px; }
-.kpi {
-  flex: 1; position: relative; overflow: hidden;
-  border: 1px solid #E3E9F0; border-radius: 12px; padding: 12px 16px 12px 18px; background: #fff;
-}
-.kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-               background: linear-gradient(180deg, #2F7CF6, #19B5C9); }
-.kpi .k { font-size: 8.5px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #64748B; }
-.kpi .v { margin-top: 4px; font-size: 24px; font-weight: 800; letter-spacing: -.02em; color: #0D2742; }
-.kpi .v small { font-size: 12px; font-weight: 600; color: #64748B; margin-left: 3px; }
-
-/* ---------- Section title ---------- */
-.sec { display: flex; align-items: baseline; justify-content: space-between; margin: 0 2px 10px; }
-.sec h2 { margin: 0; font-size: 14px; font-weight: 750; color: #0D2742; }
-.sec span { font-size: 9.5px; color: #64748B; }
-
-/* ---------- Quarter sections (the big break) ---------- */
-.qsec { margin-top: 26px; }
-.qsec.first { margin-top: 0; }
-.qhead {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 13px 20px 12px; border-radius: 12px 12px 0 0; color: #fff;
-  background:
-    radial-gradient(380px 120px at 95% 0%, rgba(25,181,201,.30), transparent 70%),
-    linear-gradient(110deg, #07182A 0%, #0D2742 60%, #123A63 100%);
-  border-bottom: 3px solid #19B5C9;
-  break-inside: avoid; break-after: avoid; page-break-after: avoid;
-}
-.qk { font-size: 8px; font-weight: 800; letter-spacing: .2em; text-transform: uppercase; color: #7FE3EF; }
-.qt { margin-top: 2px; font-size: 24px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05; }
-.qstats { display: flex; gap: 26px; text-align: right; }
-.qstats b { display: block; font-size: 17px; font-weight: 800; letter-spacing: -.01em; }
-.qstats span { font-size: 7.5px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: #8FB3D9; }
-
-/* ---------- Table ---------- */
-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 10.5px;
-        border: 1px solid #E3E9F0; border-top: none; border-radius: 0 0 12px 12px; }
-thead { display: table-header-group; }
-th {
-  background: #F3F6FA; color: #64748B; font-size: 8px; font-weight: 700; letter-spacing: .14em;
-  text-transform: uppercase; text-align: left; padding: 8px 14px; border-bottom: 1px solid #E3E9F0;
-}
-th:first-child { text-align: center; }
-th .thq { color: #1D4ED8; }
-td { padding: 8px 14px; border-bottom: 1px solid #EEF2F6; vertical-align: middle; }
-tbody tr:last-child td { border-bottom: none; }
-td.n { text-align: center; color: #94A3B8; font-weight: 600; }
-tr { break-inside: avoid; page-break-inside: avoid; }
-.loc { padding-left: 26px; }
-.loc b { display: block; font-size: 11.5px; font-weight: 650; color: #0D2742; }
-.loc span { display: block; margin-top: 1px; font-size: 9.5px; color: #64748B; }
-.cap { display: flex; align-items: center; gap: 12px; }
-.bar { flex: 1; height: 7px; border-radius: 999px; background: #EDF2F7; overflow: hidden; }
-.bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #2F7CF6, #19B5C9); }
-.cap b { min-width: 78px; text-align: right; font-size: 12px; font-weight: 750; color: #0D2742; white-space: nowrap; }
-.cap b small { margin-left: 3px; font-size: 9px; font-weight: 650; color: #64748B; }
-
-/* ---------- Region sub-groups inside each quarter ---------- */
-tr.rg td { padding: 9px 14px 8px; border-bottom: 1px solid #E3E9F0; break-after: avoid; page-break-after: avoid; }
-.rh { display: flex; align-items: center; justify-content: space-between; }
-.rl { display: flex; align-items: center; gap: 9px; }
-.rdot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-.rt { font-size: 11.5px; font-weight: 800; letter-spacing: .02em; color: #0D2742; text-transform: uppercase; }
-.rm { font-size: 9.5px; font-weight: 650; color: #475569; }
-
-/* ---------- Call to action ---------- */
-.cta {
-  margin-top: 24px; padding: 16px 20px; border-radius: 12px; break-inside: avoid;
-  background:
-    radial-gradient(360px 140px at 100% 0%, rgba(25,181,201,.28), transparent 70%),
-    linear-gradient(120deg, #0D2742, #123A63);
-  color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 20px;
-}
-.cta-text b { display: block; font-size: 22px; font-weight: 800; letter-spacing: -.01em; }
-.cta-btn {
-  flex: none; display: inline-block; padding: 12px 26px; border-radius: 999px; text-decoration: none;
-  background: #fff; color: #0D2742; font-size: 22px; font-weight: 800; letter-spacing: -.01em;
-}
-.cta-btn small { display: block; font-size: 8.5px; font-weight: 700; letter-spacing: .18em;
-                 text-transform: uppercase; color: #19A3B5; margin-bottom: 2px; }
-"
-
-# ---------- Report scope panel (which filters this PDF was built with) ----------
-CLIENT_PDF_SCOPE_CSS <- "
-.scope { margin-top: 16px; padding: 12px 14px 14px; border: 1px solid #E3E9F0; border-radius: 14px;
-         background: linear-gradient(180deg, #F8FAFC, #F3F6FA); break-inside: avoid; }
-.scope-head { display: flex; align-items: center; justify-content: space-between; margin: 0 2px 10px; }
-.scope-k { display: flex; align-items: center; gap: 8px; font-size: 8.5px; font-weight: 800;
-           letter-spacing: .18em; text-transform: uppercase; color: #1D4ED8; }
-.scope-k::before { content: ''; width: 7px; height: 7px; border-radius: 50%;
-                   background: linear-gradient(135deg, #2F7CF6, #19B5C9); }
-.scope-note { font-size: 9px; color: #64748B; }
-.scope-grid { display: flex; gap: 10px; align-items: stretch; }
-.sc { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: flex-start; position: relative;
-      background: #fff; border: 1px solid #E3E9F0; border-radius: 10px; padding: 10px 12px; overflow: hidden; }
-.sc.wide { flex: 1.7; }
-.sc.is-set { border-color: #C7D8FB; }
-.sc.is-set::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-                     background: linear-gradient(180deg, #2F7CF6, #19B5C9); }
-.sc-ic { flex: none; width: 28px; height: 28px; border-radius: 8px; background: #EEF4FF;
-         display: flex; align-items: center; justify-content: center; }
-.sc.is-default .sc-ic { background: #F1F5F9; }
-.sc-ic svg { width: 15px; height: 15px; fill: none; stroke: #2F7CF6; stroke-width: 2;
-             stroke-linecap: round; stroke-linejoin: round; }
-.sc.is-default .sc-ic svg { stroke: #94A3B8; }
-.sc-body { min-width: 0; }
-.sc-k { display: flex; align-items: center; gap: 6px; font-size: 7.5px; font-weight: 700;
-        letter-spacing: .14em; text-transform: uppercase; color: #64748B; }
-.sc-tag { font-size: 6.5px; letter-spacing: .12em; padding: 1px 6px; border-radius: 999px;
-          background: #E0ECFF; color: #1D4ED8; }
-.sc-v { margin-top: 4px; font-size: 13px; font-weight: 750; letter-spacing: -.01em; color: #0D2742; }
-.sc.is-default .sc-v { color: #64748B; font-weight: 600; }
-.sc-chips { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 5px; }
-.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px;
-        border-radius: 999px; font-size: 10px; font-weight: 700; color: #0D2742;
-        background: var(--tint, #F3F6FA); border: 1px solid rgba(13,39,66,.07); }
-.chip i { width: 7px; height: 7px; border-radius: 2px; background: var(--dot, #94A3B8); }
-.chip-more { color: #64748B; background: #F3F6FA; }
-.sc.is-default .chip { color: #64748B; }
-"
 
 # Removes any operator name from a text vector (e.g. a Market called
 # "Equinix Dallas" becomes "Dallas")
@@ -1590,13 +1443,6 @@ quarter_span_txt <- function(qs) {
     human_list(qs, 6)
   }
 }
-
-CLIENT_PDF_ICONS <- list(
-  globe  = "<circle cx='12' cy='12' r='9'/><path d='M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18'/>",
-  cal    = "<rect x='3' y='5' width='18' height='16' rx='2'/><path d='M3 10h18M8 3v4M16 3v4'/>",
-  bolt   = "<path d='M13 2 4 14h7l-1 8 9-12h-7z'/>",
-  search = "<circle cx='11' cy='11' r='7'/><path d='m20 20-3.5-3.5'/>"
-)
 
 # ---------- Client regions ----------
 # USA sites use the Region you set in DC.xlsx ("South West" -> "USA – South West").
@@ -1692,215 +1538,6 @@ client_region_colors <- function(region) {
     region == "EMEA"           ~ "#10B981|#ECFAF4",
     region == "APAC"           ~ "#E11D48|#FDEEF2",
     TRUE                       ~ "#94A3B8|#F3F6FA"
-  )
-}
-
-# The "Report scope" panel shown under the hero
-client_pdf_scope_html <- function(scope) {
-  if (is.null(scope)) return("")
-  e <- function(x) htmltools::htmlEscape(as.character(x))
-
-  cell <- function(ic, key, set, value = NULL, chips = NULL, wide = FALSE) {
-    paste0(
-      "<div class='sc", if (wide) " wide" else "", if (set) " is-set" else " is-default", "'>",
-      "<div class='sc-ic'><svg viewBox='0 0 24 24'>", CLIENT_PDF_ICONS[[ic]], "</svg></div>",
-      "<div class='sc-body'>",
-      "<div class='sc-k'>", e(key),
-      if (set) "<span class='sc-tag'>Filtered</span>" else "",
-      "</div>",
-      if (!is.null(chips)) paste0("<div class='sc-chips'>", chips, "</div>")
-      else paste0("<div class='sc-v'>", e(value), "</div>"),
-      "</div></div>"
-    )
-  }
-
-  # Location chips, coloured like the region groups in the table
-  ch <- scope$chips
-  rg <- scope$chip_regions
-  extra <- 0
-  if (length(ch) > 8) {
-    extra <- length(ch) - 8
-    ch <- ch[1:8]
-    rg <- rg[1:8]
-  }
-  cols <- strsplit(client_region_colors(rg), "|", fixed = TRUE)
-  chips <- paste0(vapply(seq_along(ch), function(i) {
-    paste0("<span class='chip' style='--dot:", cols[[i]][1], ";--tint:", cols[[i]][2], "'><i></i>",
-           e(ch[i]), "</span>")
-  }, character(1)), collapse = "")
-  if (extra > 0) {
-    chips <- paste0(chips, "<span class='chip chip-more'>+", extra, " more</span>")
-  }
-
-  paste0(
-    "<div class='scope'>",
-    "<div class='scope-head'><span class='scope-k'>Report scope</span>",
-    "<span class='scope-note'>",
-    if (scope$any_set) "Only opportunities matching these filters are included"
-    else "Complete pipeline &middot; no filters applied",
-    "</span></div>",
-    "<div class='scope-grid'>",
-    cell("globe", scope$loc_key, scope$loc_set, chips = chips, wide = TRUE),
-    cell("cal", "Delivery window", scope$win_set, value = scope$win_txt),
-    cell("bolt", "Capacity per opportunity", scope$mw_set, value = scope$mw_txt),
-    if (!is.null(scope$keyword)) cell("search", "Keyword", TRUE, value = scope$keyword) else "",
-    "</div></div>"
-  )
-}
-
-# df must already have the Operator column removed; `operators` is the
-# full list of names to scrub from every remaining text field.
-# `scope` (optional) describes the filters the report was built with.
-client_pdf_html <- function(df, operators = character(0), scope = NULL) {
-  stopifnot(!"Operator" %in% names(df))
-  e <- function(x) htmltools::htmlEscape(coalesce(as.character(x), ""))
-  logo <- client_pdf_logo()
-  
-  df$Region_Client <- client_region(df$State, df$Country, df$Region)   # before scrubbing
-  df$Region_Client <- scrub_operators(df$Region_Client, operators)
-  for (col in c("City", "State", "Country", "Quarter")) {
-    df[[col]] <- scrub_operators(as.character(df[[col]]), operators)
-  }
-  df$City <- ifelse(nzchar(df$City), df$City, "Undisclosed")
-  df$MW <- coalesce(as.numeric(df$`MW Available`), 0)
-  
-  mw_max <- max(df$MW, 1, na.rm = TRUE)
-  quarters <- unique(df$Quarter)             # already in date order
-  regions_all <- client_region_order(df$Region_Client)
-  
-  plural <- function(n) if (n == 1) " opportunity" else " opportunities"
-  n <- 0L
-  
-  row_html <- function(r) {
-    n <<- n + 1L
-    sub <- c(r$State, r$Country)
-    sub <- sub[!is.na(sub) & nzchar(sub)]
-    paste0(
-      "<tr class='row'>",
-      "<td class='n'>", n, "</td>",
-      "<td class='loc'><b>", e(r$City), "</b>",
-      if (length(sub)) paste0("<span>", e(paste(sub, collapse = " · ")), "</span>") else "",
-      "</td>",
-      "<td><div class='cap'><div class='bar'><i style='width:",
-      max(4, round(100 * r$MW / mw_max)), "%'></i></div><b>", e(cap_num(r$MW)), "<small>", cap_unit(r$MW), "</small></b></div></td>",
-      "</tr>"
-    )
-  }
-  
-  # Quarter -> Region -> sites
-  quarter_html <- vapply(seq_along(quarters), function(qi) {
-    q <- quarters[qi]
-    gq <- df[df$Quarter == q, ]
-    regs <- client_region_order(gq$Region_Client)
-    
-    body <- vapply(regs, function(rg) {
-      g <- gq[gq$Region_Client == rg, ]
-      g <- g[order(-g$MW), ]
-      col <- strsplit(client_region_colors(rg), "|", fixed = TRUE)[[1]]
-      paste0(
-        "<tr class='rg'><td colspan='3' style='background:", col[2], "'><div class='rh'>",
-        "<div class='rl'><span class='rdot' style='background:", col[1], "'></span>",
-        "<span class='rt'>", e(rg), "</span></div>",
-        "<span class='rm'>", nrow(g), plural(nrow(g)), " &middot; ", e(fmt_cap(sum(g$MW))), "</span>",
-        "</div></td></tr>",
-        paste0(vapply(seq_len(nrow(g)), function(i) row_html(g[i, ]), character(1)), collapse = "")
-      )
-    }, character(1))
-    
-    paste0(
-      "<section class='qsec", if (qi == 1) " first" else "", "'>",
-      "<div class='qhead'><div><div class='qk'>Coming online</div><div class='qt'>", e(q), "</div></div>",
-      "<div class='qstats'>",
-      "<div><b>", nrow(gq), "</b><span>", trimws(plural(nrow(gq))), "</span></div>",
-      "<div><b>", length(regs), "</b><span>", if (length(regs) == 1) "region" else "regions", "</span></div>",
-      "<div><b>", e(cap_num(sum(gq$MW))), "</b><span>", cap_unit(sum(gq$MW)), "</span></div>",
-      "</div></div>",
-      "<table><colgroup><col style='width:6%'><col style='width:52%'><col style='width:42%'></colgroup>",
-      "<thead><tr><th>#</th><th>Market / Location <span class='thq'>&middot; ", e(q), "</span></th>",
-      "<th>Capacity</th></tr></thead>",
-      "<tbody>", paste0(body, collapse = ""), "</tbody></table>",
-      "</section>"
-    )
-  }, character(1))
-  
-  d <- Sys.Date()
-  report_date <- paste0(format(d, "%B "), as.integer(format(d, "%d")), format(d, ", %Y"))
-  
-  # Hero subtitle names the selected markets when the report is narrowed by location
-  subtitle <- if (!is.null(scope) && !is.null(scope$loc_name)) {
-    paste0("Near-term capacity coming available in ", scope$loc_name,
-           " across the ByteBridge partner network")
-  } else {
-    CLIENT_PDF_SUBTITLE
-  }
-  
-  kpi <- function(k, v, unit = "") {
-    paste0("<div class='kpi'><div class='k'>", k, "</div><div class='v'>", v,
-           if (nzchar(unit)) paste0("<small>", unit, "</small>") else "", "</div></div>")
-  }
-  
-  paste0(
-    "<!doctype html><html><head><meta charset='utf-8'>",
-    "<link rel='preconnect' href='https://fonts.googleapis.com'>",
-    "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap' rel='stylesheet'>",
-    "<style>", CLIENT_PDF_CSS, CLIENT_PDF_SCOPE_CSS, "</style></head><body>",
-    
-    "<div class='hero'>",
-    "<div class='hero-top'>",
-    if (!is.null(logo)) paste0("<img class='hero-logo' src='", logo, "' alt='ByteBridge'>")
-    else "<div class='wordmark'>ByteBridge</div>",
-    "<div class='hero-date'>Report date<b>", e(report_date), "</b></div>",
-    "</div>",
-    "<div class='eyebrow'>", e(CLIENT_PDF_EYEBROW), "</div>",
-    "<h1>", e(CLIENT_PDF_TITLE), "</h1>",
-    "<div class='sub'>", e(subtitle), "</div>",
-    "</div>",
-    
-    client_pdf_scope_html(scope),
-    
-    "<div class='kpis'>",
-    kpi("Opportunities", nrow(df)),
-    kpi("Upcoming capacity", e(cap_num(sum(df$MW))), cap_unit(sum(df$MW))),
-    kpi("Earliest availability", e(quarters[1])),
-    kpi("Regions", length(regions_all)),
-    "</div>",
-    
-    "<div class='sec'><h2>Capacity pipeline</h2>",
-    "<span>By quarter coming online, then by region &middot; exact figures, not rounded (1 MW = 1,000 kW)</span></div>",
-    paste0(quarter_html, collapse = ""),
-    
-    "<div class='cta'><div class='cta-text'><b>", e(CLIENT_PDF_CTA_HEAD), "</b></div>",
-    "<a class='cta-btn' href='mailto:", e(CLIENT_PDF_CONTACT), "'><small>Contact us</small>",
-    e(CLIENT_PDF_CONTACT), "</a></div>",
-    "</body></html>"
-  )
-}
-
-# Footer on every page. The logo sits on a dark pill so a white logo stays visible.
-# `scope_line` (e.g. "Japan & Taiwan · 5–50 MW") keeps the context on every page.
-client_pdf_footer <- function(scope_line = "") {
-  logo <- client_pdf_logo()
-  brand <- if (!is.null(logo)) {
-    paste0("<img src='", logo, "' style='height:11px; display:block;'>")
-  } else {
-    "<span style='color:#fff; font-weight:700; font-size:8px;'>ByteBridge</span>"
-  }
-
-  paste0(
-    "<div style='width:100%; padding:0 0.45in; display:flex; align-items:center; gap:12px;",
-    " font-family:Inter,Helvetica,Arial,sans-serif; font-size:7.5px; color:#64748B;",
-    " -webkit-print-color-adjust:exact; print-color-adjust:exact;'>",
-    "<span style='background:#0D2742; border-radius:6px; padding:4px 8px; display:inline-flex;",
-    " align-items:center; -webkit-print-color-adjust:exact;'>", brand, "</span>",
-    if (nzchar(scope_line)) paste0(
-      "<span style='flex:none; font-weight:700; color:#1D4ED8;'>",
-      htmltools::htmlEscape(scope_line), "</span>",
-      "<span style='color:#CBD5E1;'>|</span>"
-    ) else "",
-    "<span style='flex:1;'>", htmltools::htmlEscape(CLIENT_PDF_DISCLAIMER), "</span>",
-    "<span style='font-weight:600; color:#0D2742;'>Page <span class='pageNumber'></span>",
-    " of <span class='totalPages'></span></span>",
-    "</div>"
   )
 }
 
@@ -2903,9 +2540,53 @@ ct_word_count <- function(txt) {
   if (!nzchar(txt)) 0L else length(strsplit(txt, " ", fixed = TRUE)[[1]])
 }
 
-# rows: one row per site (Where, Market, MW, Up_lines, Quarters)
+# ---------- Missing site data (utility rate, price per kW, cooling) ----------
+# A site is flagged only when the field is blank for every row of that site.
+# Each field has its own switch in the composer, and the email asks for a
+# field only at the sites that are missing it.
+CT_GAP_FIELDS <- tribble(
+  ~id,       ~col,           ~sheet,                 ~label,         ~chip,             ~ask,                   ~icon,
+  "utility", "Utility_Rate", "Utility Rate ($/kWh)", "Utility rate", "No utility rate", "utility rate ($/kWh)", "plug",
+  "price",   "Price_per_kW", "Price ($/kW)",         "Price per kW", "No price/kW",     "price per kW",         "tag",
+  "cooling", "Cooling",      "Cooling",              "Cooling",      "No cooling info", "cooling type",         "snowflake"
+)
+
+# Values that mean "we don't actually have it"
+CT_BLANK_TOKENS <- c(
+  "", "na", "n/a", "n.a.", "nan", "null", "none", "-", "--", "–", "—", "?", "??",
+  "tbd", "tbc", "tba", "unknown", "pending", "not available", "not provided", "no data",
+  "ask", "ask operator", "0", "$0", "0.00", "$0.00"
+)
+
+ct_is_missing <- function(x) {
+  v <- str_to_lower(str_squish(coalesce(as.character(x), "")))
+  v %in% CT_BLANK_TOKENS
+}
+
+# c("a", "b", "c") -> "a, b and c"
+ct_join <- function(x) {
+  x <- x[!is.na(x) & nzchar(x)]
+  if (length(x) <= 1) return(paste(x, collapse = ""))
+  paste0(paste(head(x, -1), collapse = ", "), " and ", tail(x, 1))
+}
+
+# rows: one row per site (Where, Market, MW, Up_lines, Quarters, Gaps)
+# ask:  ids from CT_GAP_FIELDS whose switch is on
 # Returns subject, body and the word count excluding the site list.
-ct_build_email <- function(operator, rows, to, people) {
+ct_build_email <- function(operator, rows, to, people, ask = character(0)) {
+  ids <- CT_GAP_FIELDS$id
+  ask_txt <- function(n) ct_join(CT_GAP_FIELDS$ask[match(n, ids)])
+
+  # What to ask each site for: only switched-on fields that site is missing
+  needs <- lapply(seq_len(nrow(rows)), function(i) {
+    g <- if ("Gaps" %in% names(rows)) rows$Gaps[[i]] else character(0)
+    ids[ids %in% intersect(g, ask)]
+  })
+  has_need <- lengths(needs) > 0
+  any_need <- any(has_need)
+  # Everything missing across the chosen sites, asked once in a single line
+  asked <- ids[ids %in% unlist(needs)]
+
   # Site list (not counted toward the word limit)
   site_lines <- vapply(seq_len(nrow(rows)), function(i) {
     r <- rows[i, ]
@@ -2914,6 +2595,10 @@ ct_build_email <- function(operator, rows, to, people) {
               else "capacity to be confirmed"
     paste0("- ", r$Where, ": ", detail)
   }, character(1))
+
+  gap_line <- if (any_need) {
+    paste0("We're also looking to get info on the ", ask_txt(asked), ".")
+  } else NULL
 
   # Subject: sites with their quarters, kept to a readable length
   parts <- vapply(seq_len(nrow(rows)), function(i) {
@@ -2946,12 +2631,42 @@ ct_build_email <- function(operator, rows, to, people) {
     "Could you confirm whether the capacity below is still available, and share any ",
     "changes to timing or size?"
   )
-  ask <- paste0("If you have an updated capacity sheet, we'd love to see it, ",
-                "and we're happy to hop on a call if that's easier.")
+  ask <- if (any_need) {
+    "An updated capacity sheet works too, and we're happy to hop on a call if that's easier."
+  } else {
+    paste0("If you have an updated capacity sheet, we'd love to see it, ",
+           "and we're happy to hop on a call if that's easier.")
+  }
   sign <- "Best,"
 
-  body <- paste(c(greet, "", intro, "", site_lines, "", ask, "", sign), collapse = "\n")
-  list(subject = subject, body = body, words = ct_word_count(c(greet, intro, ask, sign)))
+  body <- paste(c(greet, "", intro, "", site_lines, "",
+                  if (any_need) c(gap_line, ""), ask, "", sign), collapse = "\n")
+  list(
+    subject   = subject,
+    body      = body,
+    words     = ct_word_count(c(greet, intro, gap_line, ask, sign)),
+    highlight = gap_line,
+    asked     = asked,
+    n_asked   = sum(has_need)
+  )
+}
+
+# One switch per missing field. It only shows when a selected site is missing that field.
+ct_gap_toggle <- function(id, label, ic) {
+  conditionalPanel(
+    condition = paste0("Number(output.ct_gap_", id, ") > 0"),
+    tags$label(
+      class = "ct-gap-opt",
+      span(class = "ct-gap-ic", icon(ic)),
+      span(class = "ct-gap-txt",
+           span(class = "ct-gap-name", label, span(class = "ct-gap-tag")),
+           span(class = "ct-gap-meta", textOutput(paste0("ct_gap_", id, "_txt"), inline = TRUE))),
+      span(class = "ct-switch",
+           tags$input(id = paste0("ct_ask_", id), type = "checkbox", checked = NA,
+                      `aria-label` = paste("Ask for", label)),
+           span(class = "ct-switch-track"))
+    )
+  )
 }
 
 CT_WORD_LIMIT <- 75L
@@ -3017,8 +2732,22 @@ window.dcMail = {
     Shiny.setInputValue('ct_draft_op', { op: el.getAttribute('data-op'), n: Date.now() }, { priority: 'event' });
     var c = document.getElementById('ct_composer');
     if (c) setTimeout(function() { c.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 60);
+  },
+  // "Draft email" from another tab (tables, map popups, match cards):
+  // the server switches to the Contact tab, then we scroll to the composer
+  jump: function(el) {
+    window.dcMailScroll = true;
+    if (window.$ && $.fn) $('.leaflet-popup-close-button').each(function() { this.click(); });
+    Shiny.setInputValue('ct_draft_op', { op: el.getAttribute('data-op'), n: Date.now(), jump: true },
+                        { priority: 'event' });
   }
 };
+$(document).on('shown.bs.tab', function() {
+  if (!window.dcMailScroll) return;
+  window.dcMailScroll = false;
+  var c = document.getElementById('ct_composer');
+  if (c) setTimeout(function() { c.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 250);
+});
 )---"
 
 CONTACT_CSS <- r"---(
@@ -3188,6 +2917,115 @@ CONTACT_CSS <- r"---(
 .ct-empty .ic { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; background: rgba(59,130,246,.12); color: var(--blue-2); }
 .ct-empty h5 { color: #F1F5F9; font-weight: 700; margin: 0 0 4px; font-size: 15px; }
 
+/* ---------- Missing site data ----------
+   Missing = "to request", not an error: cool blue/teal accents,
+   dashed outlines for empty fields, solid green for on file. */
+.ct-gap-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 7px; border-radius: 7px;
+  font-size: 11px; font-weight: 600; line-height: 1.55; white-space: nowrap; letter-spacing: .01em;
+  color: var(--ink-2); background: rgba(96,165,250,.06); border: 1px dashed rgba(96,165,250,.42);
+}
+.ct-gap-chip i { font-size: 10px; color: var(--blue-2); }
+.ct-gap-chip b {
+  min-width: 17px; height: 17px; padding: 0 5px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(96,165,250,.18); color: #DBEAFE; font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+.ct-gap-chip.ok { color: #A7F3D0; background: rgba(45,212,191,.08); border: 1px solid rgba(45,212,191,.28); }
+.ct-gap-chip.ok i { color: #5EEAD4; }
+.ct-site-gaps { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.ct-card-gaps { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.ct-card-gaps .lbl {
+  display: inline-flex; align-items: center; gap: 6px; margin-right: 2px; color: var(--ink-3);
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+}
+.ct-card-gaps .lbl i { color: var(--blue-2); }
+
+/* Overview card */
+.ct-gap-top { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.ct-ring {
+  --p: 0; width: 64px; height: 64px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: conic-gradient(from -90deg, #2DD4BF 0, #3B82F6 calc(var(--p) * 1%), var(--line) 0);
+  box-shadow: 0 0 0 1px var(--line), 0 10px 24px rgba(45,212,191,.12);
+}
+.ct-ring span {
+  width: 50px; height: 50px; border-radius: 50%; background: var(--panel); display: grid; place-items: center;
+  font-size: 13px; font-weight: 750; color: #F8FAFC; font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+}
+.ct-gap-top-txt b { display: block; font-size: 15.5px; color: #F8FAFC; font-weight: 700; letter-spacing: -.01em; }
+.ct-gap-top-txt small { color: var(--ink-3); font-size: 12px; line-height: 1.4; }
+.ct-gapbar { margin-bottom: 14px; }
+.ct-gapbar-top { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--ink-2); margin-bottom: 7px; }
+.ct-gapbar-top i { color: var(--ink-3); margin-right: 8px; width: 14px; text-align: center; }
+.ct-gapbar-num { color: var(--ink-3); font-size: 12px; }
+.ct-gapbar-num b { color: #F1F5F9; font-size: 13px; font-variant-numeric: tabular-nums; }
+.ct-gapbar-num small { color: var(--ink-3); margin-left: 6px; font-variant-numeric: tabular-nums; }
+.ct-gapbar-track { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.ct-gapbar-track span {
+  display: block; height: 100%; border-radius: 999px; transition: width .5s cubic-bezier(.2,.8,.2,1);
+  background: linear-gradient(90deg, #3B82F6, #60A5FA);
+}
+.ct-gap-foot { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--ink-3); margin-top: 6px; padding-top: 12px; border-top: 1px dashed var(--line-2); line-height: 1.45; }
+.ct-gap-foot i { color: #5EEAD4; margin-top: 2px; }
+
+/* Composer: summary + per-field switches */
+.ct-gap-flag, .ct-gap-allset {
+  position: relative; display: flex; gap: 11px; align-items: flex-start; padding: 11px 13px 11px 15px;
+  border-radius: 11px; font-size: 12.5px; line-height: 1.5; margin-bottom: 8px; color: var(--ink-2);
+  background: var(--panel-2); border: 1px solid var(--line); overflow: hidden;
+}
+.ct-gap-flag::before, .ct-gap-allset::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.ct-gap-flag::before { background: linear-gradient(180deg, #60A5FA, #3B82F6); }
+.ct-gap-allset::before { background: linear-gradient(180deg, #5EEAD4, #2DD4BF); }
+.ct-gap-flag > i { color: var(--blue-2); margin-top: 3px; }
+.ct-gap-allset > i { color: #5EEAD4; margin-top: 3px; }
+.ct-gap-flag b, .ct-gap-allset b { color: #F1F5F9; }
+.ct-gap-list { margin-bottom: 4px; }
+.ct-gap-opt {
+  display: flex; align-items: center; gap: 12px; width: 100%; box-sizing: border-box;
+  padding: 10px 12px; margin: 0 0 6px; border-radius: 11px; cursor: pointer;
+  border: 1px solid rgba(59,130,246,.45); background: rgba(59,130,246,.07);
+  transition: border-color .15s ease, background .15s ease;
+}
+.ct-gap-opt:hover { border-color: rgba(96,165,250,.7); }
+.ct-gap-opt:has(input:not(:checked)) { border-color: var(--line); background: var(--panel-2); }
+.ct-gap-opt:has(input:not(:checked)) .ct-gap-name { color: var(--ink-2); }
+.ct-gap-opt:has(input:not(:checked)) .ct-gap-ic { background: rgba(100,116,139,.14); color: var(--ink-3); border-color: transparent; }
+.ct-gap-opt:has(input:not(:checked)) .ct-gap-tag { color: var(--ink-3); border-color: var(--line-2); }
+.ct-gap-tag::before { content: "To request"; }
+.ct-gap-opt:has(input:not(:checked)) .ct-gap-tag::before { content: "Skipped"; }
+.ct-gap-ic {
+  width: 32px; height: 32px; border-radius: 9px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(59,130,246,.16); color: #BFDBFE; border: 1px solid rgba(96,165,250,.25); transition: all .15s ease;
+}
+.ct-gap-txt { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 1px; }
+.ct-gap-name { display: flex; align-items: center; gap: 8px; font-weight: 650; color: #F1F5F9; font-size: 13.5px; }
+.ct-gap-tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  padding: 0 6px; border-radius: 5px; color: #93C5FD; border: 1px dashed rgba(96,165,250,.5);
+}
+.ct-gap-meta { font-size: 12px; color: var(--ink-3); }
+.ct-switch { position: relative; flex: none; width: 40px; height: 22px; }
+.ct-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+.ct-switch-track { position: absolute; inset: 0; border-radius: 999px; background: var(--line-2); transition: background .18s ease, box-shadow .18s ease; }
+.ct-switch-track::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); transition: transform .18s cubic-bezier(.2,.8,.2,1);
+}
+.ct-switch input:checked + .ct-switch-track { background: var(--blue); box-shadow: 0 4px 12px rgba(59,130,246,.4); }
+.ct-switch input:checked + .ct-switch-track::after { transform: translateX(18px); }
+.ct-switch input:focus-visible + .ct-switch-track { outline: 2px solid var(--blue-2); outline-offset: 2px; }
+.ct-gap-onfile { font-size: 12px; color: var(--ink-3); margin: 2px 0 14px; }
+.ct-gap-onfile i { color: #5EEAD4; margin-right: 6px; }
+
+/* Preview: what the email asks for */
+.ct-chip.gap { background: transparent; color: #BFDBFE; border: 1px dashed rgba(96,165,250,.5); }
+.ct-chip.gap i { margin-right: 5px; font-size: 11px; color: var(--blue-2); }
+.ct-asks-note { font-size: 12px; color: var(--ink-3); }
+mark.ct-ask-hl {
+  background: linear-gradient(transparent 58%, rgba(59,130,246,.28) 58%); color: #E0EAFF;
+  padding: 0 1px; border-radius: 2px;
+}
+
 @media (max-width: 768px) {
   .ct-hero { padding: 20px; }
   .ct-hero-side { align-items: flex-start; }
@@ -3219,6 +3057,10 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
         Country  = first(Country),
         MW       = if (all(is.na(Capacity_MW_est))) NA_real_ else sum(Capacity_MW_est, na.rm = TRUE),
         Contacts = paste(unique(na.omit(Contacts[nzchar(str_squish(coalesce(Contacts, "")))])), collapse = "\n"),
+        # Flag a field only when no row of the site has it
+        gap_utility = all(ct_is_missing(Utility_Rate)),
+        gap_price   = all(ct_is_missing(Price_per_kW)),
+        gap_cooling = all(ct_is_missing(Cooling)),
         .groups = "drop"
       )
 
@@ -3242,6 +3084,9 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
       left_join(up, by = "key") %>%
       mutate(Where = ct_where(Market, State, Country))
     out$Quarters <- lapply(out$Quarters, function(q) if (is.null(q)) character(0) else q)
+    out$Gaps <- lapply(seq_len(nrow(out)), function(i)
+      CT_GAP_FIELDS$id[c(out$gap_utility[i], out$gap_price[i], out$gap_cooling[i])])
+    out$n_gaps <- lengths(out$Gaps)
 
     if (!is.null(act) && nrow(act) > 0) {
       out <- out %>%
@@ -3318,6 +3163,38 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
     )
   })
 
+  # ---------- Missing site data across all sites ----------
+  output$ct_gaps_overview <- renderUI({
+    s <- ct_sites()
+    n <- nrow(s)
+    if (n == 0) return(div(class = "ct-note", "No sites loaded."))
+    complete <- sum(s$n_gaps == 0)
+    p_done <- round(100 * complete / n)
+    bars <- lapply(seq_len(nrow(CT_GAP_FIELDS)), function(i) {
+      f <- CT_GAP_FIELDS[i, ]
+      k <- sum(s[[paste0("gap_", f$id)]], na.rm = TRUE)
+      p <- round(100 * k / n)
+      div(class = "ct-gapbar",
+          div(class = "ct-gapbar-top",
+              span(icon(f$icon), f$label),
+              span(class = "ct-gapbar-num", tags$b(format(k, big.mark = ",")), " missing",
+                   tags$small(paste0(p, "%")))),
+          div(class = "ct-gapbar-track", span(style = paste0("width:", p, "%")),
+              title = paste0(f$sheet, ": blank for ", k, " of ", n, " sites")))
+    })
+    tagList(
+      div(class = "ct-gap-top",
+          div(class = "ct-ring", style = paste0("--p:", p_done), span(paste0(p_done, "%"))),
+          div(class = "ct-gap-top-txt",
+              tags$b(paste0(format(complete, big.mark = ","), " of ", format(n, big.mark = ","),
+                            " sites complete")),
+              tags$small("Utility rate, price per kW and cooling all filled in"))),
+      bars,
+      div(class = "ct-gap-foot", icon("wand-magic-sparkles"), span(
+          "Draft an email and the missing fields are asked for in one line."))
+    )
+  })
+
   # ---------- Check-in queue: one card per operator ----------
   ct_show_all <- reactiveVal(FALSE)
   observeEvent(input$ct_more, ct_show_all(!ct_show_all()))
@@ -3337,6 +3214,9 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
         email   = first(na.omit(first_email)),
         n_mail  = sum(n_emails),
         sites   = list(tibble(Where = Where, Days = Days)),
+        g_utility = sum(gap_utility),
+        g_price   = sum(gap_price),
+        g_cooling = sum(gap_cooling),
         .groups = "drop"
       ) %>%
       left_join(totals, by = "Operator") %>%
@@ -3387,6 +3267,17 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
                                paste0(top$Days[j], "d")))
                 }),
                 if (nrow(st) > 3) tags$li(span(class = "more", paste0("+", nrow(st) - 3, " more")))),
+        {
+          gn <- c(utility = r$g_utility, price = r$g_price, cooling = r$g_cooling)
+          if (sum(gn) > 0) div(
+            class = "ct-card-gaps",
+            span(class = "lbl", icon("clipboard-list"), "To request"),
+            lapply(names(gn)[gn > 0], function(id) {
+              f <- CT_GAP_FIELDS[CT_GAP_FIELDS$id == id, ]
+              span(class = "ct-gap-chip", title = paste0(f$sheet, " is blank for ", gn[[id]], " due site(s)"),
+                   icon(f$icon), f$label, tags$b(gn[[id]]))
+            }))
+        },
         div(class = "ct-card-foot",
             if (!is.na(r$email)) div(class = "ct-who", icon("at"), r$email)
             else div(class = "ct-who none", icon("triangle-exclamation"), "No email in the sheet"),
@@ -3440,7 +3331,17 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
               span(class = "ct-site-name", r$Where),
               if (!is.na(r$Days) && r$Days >= th)
                 span(class = paste("ct-days", if (r$Days >= 2 * th) "ct-old"), paste0(r$Days, "d"))),
-          span(class = "ct-site-meta", meta))
+          span(class = "ct-site-meta", meta),
+          div(class = "ct-site-gaps",
+              if (length(r$Gaps[[1]]) == 0) {
+                span(class = "ct-gap-chip ok", icon("check"), "Pricing & cooling on file")
+              } else {
+                lapply(r$Gaps[[1]], function(id) {
+                  f <- CT_GAP_FIELDS[CT_GAP_FIELDS$id == id, ]
+                  span(class = "ct-gap-chip", title = paste(f$sheet, "is blank in the sheet"),
+                       icon(f$icon), f$chip)
+                })
+              }))
     })
     tagList(
       div(class = "ct-picker-head",
@@ -3492,6 +3393,69 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
     x[str_detect(x, "@")]
   }), 400)
 
+  # ---------- Missing data to request ----------
+  # How many of the ticked sites are missing each field
+  ct_gap_counts <- reactive({
+    ids <- CT_GAP_FIELDS$id
+    zero <- setNames(integer(length(ids)), ids)
+    if (!isTruthy(input$ct_operator)) return(list(n = 0L, cnt = zero, sites = 0L))
+    rows <- ct_chosen()
+    if (nrow(rows) == 0) return(list(n = 0L, cnt = zero, sites = 0L))
+    cnt <- vapply(ids, function(id) sum(vapply(rows$Gaps, function(g) id %in% g, logical(1))), integer(1))
+    list(n = nrow(rows), cnt = setNames(cnt, ids), sites = sum(rows$n_gaps > 0))
+  })
+
+  for (gid in CT_GAP_FIELDS$id) local({
+    id <- gid
+    out_n <- paste0("ct_gap_", id)
+    output[[out_n]] <- renderText(ct_gap_counts()$cnt[[id]])
+    outputOptions(output, out_n, suspendWhenHidden = FALSE)
+    output[[paste0(out_n, "_txt")]] <- renderText({
+      g <- ct_gap_counts()
+      if (g$n == 1) "Blank in the sheet for this site"
+      else paste0("Blank for ", g$cnt[[id]], " of ", g$n, " selected sites")
+    })
+  })
+
+  # Fields whose switch is on
+  ct_asked <- reactive({
+    ids <- CT_GAP_FIELDS$id
+    ids[vapply(ids, function(id) !isFALSE(input[[paste0("ct_ask_", id)]]), logical(1))]
+  })
+
+  # A new operator starts with every switch on
+  observeEvent(input$ct_operator, {
+    for (id in CT_GAP_FIELDS$id) updateCheckboxInput(session, paste0("ct_ask_", id), value = TRUE)
+  })
+
+  output$ct_gap_summary <- renderUI({
+    if (!isTruthy(input$ct_operator)) {
+      return(div(class = "ct-blank", "Missing utility rates, pricing and cooling show up here."))
+    }
+    g <- ct_gap_counts()
+    if (g$n == 0) return(div(class = "ct-blank", "Tick a site to check its data."))
+    if (sum(g$cnt) == 0) {
+      return(div(class = "ct-gap-allset", icon("circle-check"),
+                 div(tags$b("Everything's on file."),
+                     " Utility rate, price per kW and cooling are filled in for ",
+                     if (g$n == 1) "this site" else "these sites", ", so the email only asks about capacity.")))
+    }
+    n_missing <- sum(g$cnt > 0)
+    verb <- if (g$sites == 1) " is missing " else " are missing "
+    div(class = "ct-gap-flag", icon("clipboard-list"),
+        div(tags$b(paste0(g$sites, " of ", g$n, if (g$n == 1) " site" else " sites")), verb,
+            tags$b(paste0(n_missing, if (n_missing == 1) " field" else " fields")),
+            " in the sheet. Switched-on fields are asked for in one short line."))
+  })
+
+  output$ct_gap_onfile <- renderUI({
+    g <- ct_gap_counts()
+    if (g$n == 0 || sum(g$cnt) == 0) return(NULL)
+    on_file <- CT_GAP_FIELDS$label[g$cnt == 0]
+    if (length(on_file) == 0) return(NULL)
+    div(class = "ct-gap-onfile", icon("circle-check"), paste0(ct_join(on_file), " already on file"))
+  })
+
   # ---------- Preview ----------
   output$ct_preview <- renderUI({
     win <- function(...) div(class = "ct-window",
@@ -3514,8 +3478,15 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
                      "Tick at least one site to mention in the email.")))
     }
     to <- ct_to()
-    mail <- ct_build_email(input$ct_operator, rows, to, ct_people())
+    mail <- ct_build_email(input$ct_operator, rows, to, ct_people(), ask = ct_asked())
     pct <- min(100, round(100 * mail$words / CT_WORD_LIMIT))
+
+    # Highlight the missing-data questions in the preview
+    body_html <- htmltools::htmlEscape(mail$body)
+    for (h in mail$highlight) {
+      eh <- htmltools::htmlEscape(h)
+      body_html <- gsub(eh, paste0("<mark class=\"ct-ask-hl\">", eh, "</mark>"), body_html, fixed = TRUE)
+    }
 
     win(
       div(class = "ct-row", span(class = "ct-k", "To"),
@@ -3524,7 +3495,17 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
                else span(class = "ct-none", icon("triangle-exclamation"),
                          " No email in the sheet. Add one under Send to, or in Outlook."))),
       div(class = "ct-row", span(class = "ct-k", "Subject"), span(class = "ct-v ct-subject", mail$subject)),
-      tags$pre(class = "ct-body", mail$body),
+      if (length(mail$asked)) div(
+        class = "ct-row", span(class = "ct-k", "Asks"),
+        span(class = "ct-v",
+             lapply(mail$asked, function(id) {
+               f <- CT_GAP_FIELDS[CT_GAP_FIELDS$id == id, ]
+               span(class = "ct-chip gap", icon(f$icon), f$label)
+             }),
+             span(class = "ct-asks-note",
+                  paste0(" for ", mail$n_asked, if (mail$n_asked == 1) " site" else " sites",
+                         " missing it in the sheet")))),
+      tags$pre(class = "ct-body", HTML(body_html)),
       div(class = "ct-foot",
           div(class = paste("ct-meter", if (mail$words > CT_WORD_LIMIT) "over"),
               div(class = "bar", span(style = paste0("width:", pct, "%"))),
@@ -3622,6 +3603,23 @@ empty_plot <- function(msg) {
         showarrow = FALSE, font = list(size = 14, color = "#94A3B8")
       ))
     )
+}
+
+# "Draft email" button that opens the Contact tab composer for an operator.
+# popup = TRUE gives the light style used inside Leaflet popups.
+draft_btn_html <- function(operator, popup = FALSE) {
+  op <- htmltools::htmlEscape(coalesce(as.character(operator), ""), attribute = TRUE)
+  ifelse(
+    nzchar(op),
+    paste0(
+      if (popup) "<div class='map-draft-wrap'>" else "",
+      "<button type='button' class='", if (popup) "map-draft-btn" else "row-draft-btn",
+      "' data-op='", op, "' onclick='dcMail.jump(this)' title='Draft a capacity-check email to ", op, "'>",
+      "<i class='fa-solid fa-pen-to-square' aria-hidden='true'></i> Draft email</button>",
+      if (popup) "</div>" else ""
+    ),
+    ""
+  )
 }
 
 # Adds an in-cell bar to a numeric column (skipped if the column has no data)
@@ -3953,7 +3951,7 @@ APP_CSS <- r"---(
   --line-2: #2A3A50;
   --ink: #E6EDF6;
   --ink-2: #A3B2C6;
-  --ink-3: #6B7C93;
+  --ink-3: #8394AB;
   --blue: #3B82F6;
   --blue-2: #60A5FA;
   --amber: #F59E0B;
@@ -3980,7 +3978,7 @@ body {
 .app-title {
   display: flex; align-items: center; gap: 14px; width: 100%;
 }
-.app-title img { height: 80px; border-radius: 8px; }
+.app-title img { height: 46px; border-radius: 8px; }
 .app-title-text { line-height: 1.15; }
 .app-title-name { font-size: 20px; font-weight: 700; letter-spacing: -.01em; color: #F8FAFC; }
 .app-title-sub  { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
@@ -4504,6 +4502,133 @@ TIMELINE_CSS <- r"---(
 .hl-tl.is-on .tl-read b { color: #FCD34D; }
 )---"
 
+# ---------- Visual polish layer ----------
+# Loaded last, so it refines the styles above without changing behaviour.
+POLISH_CSS <- r"---(
+/* ---------- Header ---------- */
+.bslib-page-sidebar > header, .bslib-page-title {
+  border-bottom: 1px solid var(--line) !important;
+  background: linear-gradient(180deg, rgba(15,22,32,.92), rgba(8,12,18,.85)) !important;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  padding-top: 10px !important; padding-bottom: 10px !important;
+}
+.app-title img { box-shadow: 0 0 0 1px var(--line-2); }
+.app-title-name { font-size: 19px; background: linear-gradient(90deg, #F8FAFC, #BFDBFE);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+/* ---------- Tabs: segmented bar ---------- */
+.nav-tabs {
+  display: inline-flex !important; flex-wrap: wrap; gap: 4px !important; padding: 5px;
+  border: 1px solid var(--line) !important; border-radius: 14px; background: rgba(15,22,32,.75);
+  margin-bottom: 20px !important;
+}
+.nav-tabs .nav-link {
+  display: inline-flex; align-items: center; gap: 8px; border-radius: 10px !important;
+  border-bottom: 0 !important; padding: 8px 16px !important; font-size: 13.5px !important;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.nav-tabs .nav-link .fa, .nav-tabs .nav-link svg { font-size: 12.5px; opacity: .75; }
+.nav-tabs .nav-link:hover { background: rgba(148,163,184,.08) !important; }
+.nav-tabs .nav-link.active {
+  background: linear-gradient(135deg, #3B82F6, #2563EB) !important;
+  box-shadow: 0 6px 18px rgba(59,130,246,.35);
+}
+.nav-tabs .nav-link.active .fa, .nav-tabs .nav-link.active svg { opacity: 1; }
+
+/* ---------- Cards ---------- */
+.card { transition: border-color .2s ease, box-shadow .2s ease; }
+.card:hover { border-color: var(--line-2) !important; }
+.card-header.dc-card-head { border-bottom: 1px solid var(--line) !important;
+  background: linear-gradient(180deg, rgba(59,130,246,.05), transparent) !important; }
+.card-footer { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 18px !important; }
+.dc-card-ic { box-shadow: inset 0 0 0 1px rgba(96,165,250,.22); }
+
+/* ---------- KPI tiles ---------- */
+.kpi {
+  background:
+    radial-gradient(260px 120px at 100% 0%, color-mix(in srgb, var(--accent, #3B82F6) 12%, transparent), transparent 70%),
+    var(--panel);
+  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  margin-bottom: 16px;
+}
+.kpi:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--accent, #3B82F6) 45%, var(--line));
+  box-shadow: 0 14px 30px rgba(0,0,0,.35); }
+.kpi-icon { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, #3B82F6) 30%, transparent); }
+.kpi-label { font-size: 11.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-3); }
+
+/* ---------- Tables ---------- */
+table.dataTable thead th {
+  text-transform: uppercase; letter-spacing: .06em; font-size: 11px !important;
+  background-color: var(--panel-2) !important; color: var(--ink-3) !important;
+}
+table.dataTable tbody tr:nth-child(even) td { background-color: #111A25 !important; }
+table.dataTable tbody tr:hover td { background-color: #182434 !important; }
+table.dataTable tbody td { padding-top: 9px !important; padding-bottom: 9px !important; }
+table.dataTable td.dt-right, table.dataTable th.dt-right { text-align: right; font-variant-numeric: tabular-nums; }
+.dataTables_wrapper .dataTables_filter input { border-radius: 999px !important; padding: 4px 12px; }
+.dataTables_wrapper .dataTables_paginate .page-link { border-radius: 8px !important; margin: 0 2px; }
+
+/* ---------- Draft email buttons ---------- */
+.row-draft-btn {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  padding: 4px 11px; border-radius: 8px; font-size: 12px; font-weight: 650;
+  border: 1px solid rgba(59,130,246,.45); background: rgba(59,130,246,.10); color: #BFDBFE;
+  cursor: pointer; transition: all .15s ease;
+}
+.row-draft-btn:hover, .row-draft-btn:focus-visible {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+  box-shadow: 0 6px 16px rgba(59,130,246,.35); outline: none;
+}
+.row-draft-btn i { font-size: 11px; }
+.map-draft-wrap { margin-top: 10px; padding-top: 10px; border-top: 1px solid #E5E7EB; }
+.map-draft-btn {
+  display: inline-flex; align-items: center; gap: 6px; width: 100%; justify-content: center;
+  padding: 6px 12px; border-radius: 8px; border: 0; cursor: pointer;
+  background: linear-gradient(135deg, #3B82F6, #2563EB); color: #fff;
+  font: 650 12px/1.2 Inter, system-ui, sans-serif; box-shadow: 0 4px 12px rgba(37,99,235,.3);
+}
+.map-draft-btn:hover { filter: brightness(1.08); }
+.fc-actions { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line-2); }
+
+/* ---------- Map popups & tooltips ---------- */
+.leaflet-popup-content-wrapper { border-radius: 12px !important; box-shadow: 0 14px 34px rgba(0,0,0,.35) !important; }
+.leaflet-popup-content { margin: 14px 16px !important; font-family: Inter, system-ui, sans-serif; font-size: 12.5px; line-height: 1.5; }
+.leaflet-tooltip { border-radius: 8px !important; border: 0 !important; padding: 6px 10px !important;
+  font-family: Inter, system-ui, sans-serif; font-size: 12px; box-shadow: 0 6px 18px rgba(0,0,0,.25) !important; }
+.leaflet-bar a { background: rgba(15,22,32,.88) !important; color: var(--ink) !important; border-color: var(--line) !important; }
+.leaflet-bar a:hover { background: var(--blue) !important; color: #fff !important; }
+.leaflet-bar { border: 1px solid var(--line-2) !important; border-radius: 10px !important; overflow: hidden; }
+
+/* ---------- Sidebar ---------- */
+.sb-summary { background: linear-gradient(135deg, rgba(59,130,246,.12), var(--panel-2)) !important; }
+.accordion-item { border-radius: 10px !important; overflow: hidden; margin-bottom: 6px; border: 1px solid var(--line) !important; }
+#reset_filters { border-radius: 10px; border: 1px solid var(--line-2); background: transparent; color: var(--ink-2); }
+#reset_filters:hover { border-color: var(--blue); color: #fff; }
+
+/* ---------- Buttons ---------- */
+.btn-outline-primary { border-radius: 9px !important; font-weight: 600; }
+.btn-primary { border-radius: 10px; font-weight: 650; }
+
+/* ---------- Plotly hover ---------- */
+.js-plotly-plot .plotly .hoverlayer .hovertext path { stroke-width: 1px; }
+
+/* ---------- Scrollbars & selection ---------- */
+* { scrollbar-width: thin; scrollbar-color: #2A3A50 transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2A3A50; border-radius: 999px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: #3A4D68; }
+::selection { background: rgba(59,130,246,.35); color: #fff; }
+
+/* ---------- Gentle entrance for each tab ---------- */
+.tab-pane.active { animation: dcFade .28s ease-out; }
+@keyframes dcFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 768px) {
+  .nav-tabs { display: flex !important; }
+  .nav-tabs .nav-link { padding: 7px 11px !important; font-size: 12.5px !important; }
+}
+)---"
+
 # ============================================================
 # UI
 # ============================================================
@@ -4549,9 +4674,14 @@ ui <- page_sidebar(
     tags$script(HTML(APP_JS)),
     tags$script(HTML(EMP_PDF_JS)),
     tags$script(HTML(CONTACT_JS)),
-    tags$style(HTML(CONTACT_CSS))
+    tags$style(HTML(CONTACT_CSS)),
+    tags$style(HTML(POLISH_CSS))
   ),
   
+  # Spinners while outputs recalculate (needs bslib 0.7+, skipped otherwise)
+  if ("useBusyIndicators" %in% getNamespaceExports("shiny"))
+    getExportedValue("shiny", "useBusyIndicators")(spinners = TRUE, pulse = TRUE),
+
   # Sign-in cover: shown until the user signs in with Microsoft
   if (!DEV_SKIP_SIGNIN) entra_head(),
   if (!DEV_SKIP_SIGNIN) entra_overlay(),
@@ -4704,7 +4834,7 @@ ui <- page_sidebar(
     # DATA CENTERS
     # --------------------------------------------------------
     nav_panel(
-      "Data Centers",
+      "Data Centers", icon = icon("server"),
       
       layout_columns(
         col_widths = c(4, 4, 4),
@@ -4759,7 +4889,7 @@ ui <- page_sidebar(
     # UPCOMING CAPACITY
     # --------------------------------------------------------
     nav_panel(
-      "Upcoming Capacity",
+      "Upcoming Capacity", icon = icon("calendar-plus"),
       
       layout_columns(
         col_widths = c(4, 4, 4),
@@ -4806,7 +4936,7 @@ ui <- page_sidebar(
     # FIND CAPACITY
     # --------------------------------------------------------
     nav_panel(
-      "Find Capacity",
+      "Find Capacity", icon = icon("bullseye"),
       
       card(
         card_title("bullseye", "What do you need?",
@@ -4875,7 +5005,7 @@ ui <- page_sidebar(
     #   plus a quick capacity-check email that opens in Outlook.
     # --------------------------------------------------------
     nav_panel(
-      "Contact DC Operators",
+      "Contact DC Operators", icon = icon("envelope"),
       
       div(
         class = "ct-hero",
@@ -4883,6 +5013,7 @@ ui <- page_sidebar(
           div(class = "ct-eyebrow", span(class = "dot"), "Operator outreach"),
           tags$h2("Keep capacity data fresh"),
           tags$p("Spot listings that have gone quiet, then ask the operator to confirm in a couple of clicks. ",
+                 "Missing utility rates, pricing and cooling are flagged and asked for in the same email. ",
                  "Emails open as drafts in your own Outlook, so nothing is sent from the dashboard."),
           div(class = "ct-steps",
               span(class = "ct-step", tags$b("1"), "Find quiet sites"),
@@ -4907,9 +5038,16 @@ ui <- page_sidebar(
         kpi("teal", "address-book", "Due sites with no email", "ct_kpi_noemail")
       ),
       
-      card(
-        card_title("gauge-high", "Data freshness", "Every site, by how recently its numbers changed"),
-        uiOutput("ct_freshness")
+      layout_columns(
+        col_widths = c(7, 5),
+        card(
+          card_title("gauge-high", "Data freshness", "Every site, by how recently its numbers changed"),
+          uiOutput("ct_freshness")
+        ),
+        card(
+          card_title("clipboard-list", "Missing site data", "Blank in the sheet"),
+          uiOutput("ct_gaps_overview")
+        )
       ),
       
       card(
@@ -4933,7 +5071,13 @@ ui <- page_sidebar(
                            options = list(placeholder = "Choose an operator...")),
             div(class = "ct-stepnum", tags$b("2"), "Sites to mention"),
             uiOutput("ct_site_picker"),
-            div(class = "ct-stepnum", tags$b("3"), "Send to"),
+            div(class = "ct-stepnum", tags$b("3"), "Missing data to request"),
+            uiOutput("ct_gap_summary"),
+            div(class = "ct-gap-list",
+                lapply(seq_len(nrow(CT_GAP_FIELDS)), function(i)
+                  ct_gap_toggle(CT_GAP_FIELDS$id[i], CT_GAP_FIELDS$label[i], CT_GAP_FIELDS$icon[i]))),
+            uiOutput("ct_gap_onfile"),
+            div(class = "ct-stepnum", tags$b("4"), "Send to"),
             textInput("contact_to", NULL, width = "100%", placeholder = "name@operator.com"),
             div(class = "ct-hint", "Filled from the Contacts column. Separate addresses with commas.")
           ),
@@ -4946,7 +5090,7 @@ ui <- page_sidebar(
     # VERSION HISTORY
     # --------------------------------------------------------
     nav_panel(
-      "Version History",
+      "Version History", icon = icon("clock-rotate-left"),
       
       card(
         card_title("rotate", "Refresh from DC.xlsx"),
@@ -5094,6 +5238,18 @@ main_server <- function(input, output, session) {
   
   # Contact DC Operators tab
   contact_server(input, output, session, raw_data, raw_pipeline, today_q, refresh_trigger)
+
+  # "Draft email" buttons on the other tabs open the composer for that operator
+  observeEvent(input$ct_draft_op, {
+    j <- input$ct_draft_op
+    req(isTRUE(j$jump), j$op)
+    if (!j$op %in% raw_data()$Operator) {
+      showNotification(paste0(j$op, " has no current sites in the sheet, so there is nothing to draft yet."),
+                       type = "warning", duration = 6)
+      return()
+    }
+    bslib::nav_select("main_tabs", "Contact DC Operators", session = session)
+  })
   
   # ----------------------------------------------------------
   # Header: "last updated" pill + data-quality pill
@@ -5966,6 +6122,7 @@ main_server <- function(input, output, session) {
             "<br><b style='color:#F59E0B'>Capacity coming available soon - see Upcoming Capacity tab</b>",
             ""
           ),
+          if_else(is.na(Operator), "", draft_btn_html(Operator, popup = TRUE)),
           "</div>"
         ),
         label_txt = paste0(
@@ -6303,6 +6460,7 @@ main_server <- function(input, output, session) {
       "<br><br>",
       "<b>Coming online:</b> ", esc_html(map_df$Quarter), "<br>",
       "<b>MW available:</b> ", mw_txt,
+      ifelse(is.na(map_df$Operator), "", draft_btn_html(map_df$Operator, popup = TRUE)),
       "</div>"
     )
     
@@ -6382,10 +6540,14 @@ main_server <- function(input, output, session) {
         Region,
         Capacity,
         `Capacity (MW est.)` = Capacity_MW_est,
-        `MW Min` = Capacity_MW_min,
-        `MW Max` = Capacity_MW_max,
+        Capacity_MW_min,
+        Capacity_MW_max,
         Notes
       ) %>%
+      # One readable range ("20–40 MW") instead of separate Min / Max columns;
+      # blank when the sheet gives a single figure
+      mutate(`Range` = emp_range(Capacity_MW_min, Capacity_MW_max), .after = `Capacity (MW est.)`) %>%
+      select(-Capacity_MW_min, -Capacity_MW_max) %>%
       arrange(Operator, Country, State, City)
   })
   
@@ -6419,6 +6581,8 @@ main_server <- function(input, output, session) {
       ))
     
     df$Notes <- note_btn
+    df$Range <- ifelse(nzchar(df$Range), df$Range, "<span class='note-none'>&ndash;</span>")
+    df$Contact <- draft_btn_html(df$Operator)
     
     dt <- datatable(
       df,
@@ -6429,11 +6593,13 @@ main_server <- function(input, output, session) {
       options = list(
         pageLength = 15,
         dom = "lfrtip",
-        columnDefs = list(list(
-          targets = ncol(df) - 1,
-          orderable = FALSE, searchable = FALSE,
-          className = "dt-center", width = "60px"
-        )),
+        columnDefs = list(
+          list(targets = ncol(df) - 2, orderable = FALSE, searchable = FALSE,
+               className = "dt-center", width = "60px"),
+          list(targets = ncol(df) - 1, orderable = FALSE, searchable = FALSE,
+               className = "dt-center", width = "110px"),
+          list(targets = which(names(df) == "Range") - 1, className = "dt-right")
+        ),
         language = list(
           emptyTable = "No sites match the current search and filters.",
           zeroRecords = "No sites match the current search and filters."
@@ -7030,7 +7196,8 @@ main_server <- function(input, output, session) {
             span(class = "fc-tag", "Depends on where the estimate lands")
           }
         ),
-        div(class = "fc-why", style = "margin-top:8px", HTML(r$Why))
+        div(class = "fc-why", style = "margin-top:8px", HTML(r$Why)),
+        if (!is.na(r$Operator)) div(class = "fc-actions", HTML(draft_btn_html(r$Operator)))
       )
     }))
   })
