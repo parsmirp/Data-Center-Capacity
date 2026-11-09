@@ -48,6 +48,13 @@
 # operator names, carries the ByteBridge logo and a confidentiality
 # notice, and is drawn in the browser so it works on the published
 # site. Notice wording: EMP_PDF_COMPANY / emp_pdf_notice().
+#
+# Contact DC Operators: "Open in Outlook" opens the draft in Outlook
+# on the web by default, which works for everyone with Microsoft 365.
+# Under the button, each person can switch to "Desktop app" (their
+# computer's default mail app, via mailto:). The choice is remembered
+# in that person's browser. A web page cannot check which mail app a
+# computer uses, so this is a choice, not an automatic check.
 # ============================================================
 
 # ---------- Packages ----------
@@ -1680,12 +1687,12 @@ EMP_PDF_JS <- r"---(
   function clean(s) {
     if (s === null || s === undefined) return '';
     return String(s)
-      .replace(/[–—−]/g, '-')
-      .replace(/[‘’]/g, "'")
-      .replace(/[“”]/g, '"')
-      .replace(/…/g, '...')
-      .replace(/≥/g, '>=').replace(/≤/g, '<=')
-      .replace(/[  ]/g, ' ')
+      .replace(/[\u2013\u2014\u2212]/g, '-')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"')
+      .replace(/\u2026/g, '...')
+      .replace(/\u2265/g, '>=').replace(/\u2264/g, '<=')
+      .replace(/[\u00A0\u202F]/g, ' ')
       .replace(/[^\x00-\xFF]/g, '');
   }
 
@@ -2416,6 +2423,8 @@ send_client_pdf <- function(session, df, operators, scope) {
   filters <- list(
     emp_filter(if (length(scope$chips) > 1) "Markets" else "Market",
                if (scope$loc_set) scope$chips else character(0), default = "All markets"),
+    emp_filter(if (length(scope$regions) > 1) "Regions" else "Region",
+               scope$regions %||% character(0), default = "All regions"),
     emp_filter("Delivery window", if (scope$win_set) scope$win_txt else character(0),
                default = scope$win_txt),
     emp_filter("Capacity per opportunity", if (scope$mw_set) scope$mw_txt else character(0),
@@ -2696,17 +2705,22 @@ window.dcMail = {
     fallback();
     return Promise.resolve();
   },
-  // Outlook on the web (Microsoft 365), whatever the computer's default mail app is
+  // Outlook on the web (Microsoft 365). The /mail/0/ path skips the redirect
+  // that used to drop the To, Subject and Body and land on the inbox.
   outlook: function() {
     var p = this.payload(); if (!p) return;
-    var url = 'https://outlook.office.com/mail/deeplink/compose' +
-              '?to=' + encodeURIComponent(this.to().join(',')) +
+    var url = 'https://outlook.office.com/mail/0/deeplink/compose' +
+              '?to=' + encodeURIComponent(this.to().join(';')) +
               '&subject=' + encodeURIComponent(p.subject) +
               '&body=' + encodeURIComponent(p.body);
-    var w = window.open(url, '_blank', 'noopener');
+    // No 'noopener' here: with it, window.open always returns null and
+    // every click looked like a blocked pop-up.
+    var w = window.open(url, '_blank');
+    if (w) { try { w.opener = null; } catch (e) {} }
     Shiny.setInputValue('ct_opened', { n: Date.now(), via: 'outlook', blocked: !w }, { priority: 'event' });
   },
-  // The computer's default mail app (mailto:)
+  // The computer's default mail app (mailto:) - the Outlook app when Outlook
+  // is set as the default mail app
   desktop: function() {
     var p = this.payload(); if (!p) return;
     var to = this.to().join(',');
@@ -2722,6 +2736,27 @@ window.dcMail = {
     a.href = url; a.target = '_top'; a.rel = 'noopener';
     document.body.appendChild(a); a.click(); a.remove();
     Shiny.setInputValue('ct_opened', { n: Date.now(), via: 'desktop', long: long }, { priority: 'event' });
+  },
+  // Where "Open in Outlook" goes: 'web' (default) or 'desktop'.
+  // Remembered per person, in their own browser.
+  pref: function() {
+    try { return localStorage.getItem('dcMailVia') === 'desktop' ? 'desktop' : 'web'; }
+    catch (e) { return 'web'; }
+  },
+  setPref: function(v) {
+    try { localStorage.setItem('dcMailVia', v); } catch (e) {}
+    this.sync();
+  },
+  // Show the saved choice on the switch under the button
+  sync: function() {
+    var v = this.pref();
+    $('.ct-via-opt').each(function() {
+      var on = this.getAttribute('data-via') === v;
+      $(this).toggleClass('is-on', on).attr('aria-pressed', on ? 'true' : 'false');
+    });
+  },
+  open: function() {
+    if (this.pref() === 'desktop') this.desktop(); else this.outlook();
   },
   copy: function() {
     var p = this.payload(); if (!p) return;
@@ -2747,6 +2782,10 @@ $(document).on('shown.bs.tab', function() {
   window.dcMailScroll = false;
   var c = document.getElementById('ct_composer');
   if (c) setTimeout(function() { c.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 250);
+});
+// The preview is redrawn often; re-apply the saved choice each time
+$(document).on('shiny:value', function(e) {
+  if (e.name === 'ct_preview') setTimeout(function() { dcMail.sync(); }, 0);
 });
 )---"
 
@@ -2913,6 +2952,14 @@ CONTACT_CSS <- r"---(
 .ct-alt { width: 100%; text-align: right; font-size: 11.5px; color: var(--ink-3); margin-top: -2px; }
 .ct-alt a { color: var(--ink-2); text-decoration: underline dotted; cursor: pointer; }
 .ct-alt a:hover { color: #fff; }
+.ct-alt { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.ct-via { display: inline-flex; padding: 2px; gap: 2px; border-radius: 8px; background: rgba(8,12,18,.7); border: 1px solid var(--line-2); }
+.ct-via-opt {
+  border: 0; background: transparent; color: var(--ink-3); font-size: 11.5px; font-weight: 600;
+  padding: 3px 9px; border-radius: 6px; cursor: pointer; transition: all .15s ease;
+}
+.ct-via-opt:hover { color: var(--ink); }
+.ct-via-opt.is-on { background: rgba(59,130,246,.22); color: #DBEAFE; }
 .ct-empty { padding: 60px 20px; text-align: center; color: var(--ink-3); font-size: 13.5px; }
 .ct-empty .ic { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; font-size: 22px; background: rgba(59,130,246,.12); color: var(--blue-2); }
 .ct-empty h5 { color: #F1F5F9; font-weight: 700; margin: 0 0 4px; font-size: 15px; }
@@ -3513,10 +3560,20 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
                    span(style = "opacity:.75", paste0("  +  ", nrow(rows), if (nrow(rows) == 1) " site" else " sites")))),
           tags$button(type = "button", class = "ct-btn-ghost", onclick = "dcMail.copy()",
                       icon("copy"), "Copy"),
-          tags$button(type = "button", class = "btn btn-primary ct-btn-outlook", onclick = "dcMail.outlook()",
+          # Main button: Outlook on the web, unless this person switched to the desktop app
+          tags$button(type = "button", class = "btn btn-primary ct-btn-outlook", onclick = "dcMail.open()",
                       icon("envelope-open-text"), "Open in Outlook"),
-          div(class = "ct-alt", "Prefer the Outlook desktop app? ",
-              tags$a(onclick = "dcMail.desktop()", "Open in my default mail app"))),
+          div(class = "ct-alt",
+              span("Opens in"),
+              span(class = "ct-via",
+                   tags$button(type = "button", class = "ct-via-opt is-on", `data-via` = "web",
+                               onclick = "dcMail.setPref('web')", `aria-pressed` = "true",
+                               title = "Outlook on the web (works for everyone with Microsoft 365)",
+                               "Outlook on the web"),
+                   tags$button(type = "button", class = "ct-via-opt", `data-via` = "desktop",
+                               onclick = "dcMail.setPref('desktop')", `aria-pressed` = "false",
+                               title = "Your computer's default mail app. Pick this only if that is Outlook.",
+                               "Desktop app")))),
       div(id = "contact_payload", style = "display:none",
           `data-mail` = as.character(jsonlite::toJSON(
             list(subject = mail$subject, body = mail$body), auto_unbox = TRUE)))
@@ -3531,8 +3588,12 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
     } else if (isTRUE(o$long)) {
       showNotification("Long email: the text is on your clipboard. Paste it into the draft.",
                        type = "warning", duration = 8)
+    } else if (identical(o$via, "outlook")) {
+      showNotification(paste("Draft opened in Outlook on the web. If you only see the inbox,",
+                             "sign in there first and click again."), duration = 7)
     } else {
-      showNotification("Draft opened. Review it and press Send in Outlook.", duration = 5)
+      showNotification(paste("Draft sent to your computer's mail app. If the wrong app opened,",
+                             "switch to \"Outlook on the web\" under the button."), duration = 7)
     }
   })
   observeEvent(input$ct_copied, showNotification("Email copied to the clipboard.", duration = 3))
@@ -4629,6 +4690,337 @@ table.dataTable td.dt-right, table.dataTable th.dt-right { text-align: right; fo
 }
 )---"
 
+# ---------- Upcoming Capacity: region filter tiles ----------
+# Regions come from client_region(): US rows use the Region column from
+# DC.xlsx ("USA – South West"), everything else rolls up to Canada /
+# Latin America / EMEA / APAC. Click a tile to add or remove it;
+# Alt/Option-click to show only that region.
+
+REGION_CSS <- r"---(
+.rg-head { display: flex; align-items: center; justify-content: space-between; margin: 14px 0 6px; }
+.rg-head .sb-section-label { margin: 0; }
+.rg-status { font-size: 11.5px; color: var(--ink-3); }
+.rg-clear {
+  display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line-2);
+  background: transparent; color: var(--ink-2); font-size: 11.5px; font-weight: 600;
+  padding: 2px 9px; border-radius: 999px; cursor: pointer; transition: all .15s ease;
+}
+.rg-clear:hover { border-color: var(--blue); color: #fff; }
+.rg-group {
+  display: flex; align-items: center; gap: 7px; margin: 10px 2px 6px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3);
+}
+.rg-group::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.rg-group .fa, .rg-group svg { font-size: 10px; opacity: .8; }
+.rg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.rg-tile {
+  --rg: #94A3B8;
+  position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  padding: 8px 10px 9px; text-align: left; border-radius: 11px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+  transition: transform .15s ease, border-color .15s ease, background .15s ease, box-shadow .2s ease, opacity .2s ease;
+}
+.rg-tile:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--rg) 60%, var(--line-2)); }
+.rg-tile:active { transform: scale(.98); }
+.rg-tile:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 2px; }
+.rg-tile.is-on {
+  border-color: var(--rg);
+  background: color-mix(in srgb, var(--rg) 15%, var(--panel-2));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rg) 45%, transparent),
+              0 6px 16px color-mix(in srgb, var(--rg) 22%, transparent);
+}
+.rg-grid.has-sel .rg-tile:not(.is-on) { opacity: .55; }
+.rg-grid.has-sel .rg-tile:not(.is-on):hover { opacity: .9; }
+.rg-tile.is-empty { opacity: .38 !important; }
+.rg-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.rg-dot { width: 9px; height: 9px; border-radius: 3px; background: var(--rg); flex: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rg) 20%, transparent); }
+.rg-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 650; color: #F1F5F9;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rg-check {
+  width: 15px; height: 15px; flex: none; border-radius: 50%; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 8px; color: transparent;
+  border: 1px solid var(--line-2); transition: all .15s ease;
+}
+.rg-tile.is-on .rg-check { background: var(--rg); border-color: var(--rg); color: #fff; }
+.rg-bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.rg-bar span { display: block; height: 100%; border-radius: 999px; background: var(--rg);
+  transition: width .4s cubic-bezier(.2,.8,.2,1); }
+.rg-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 11px;
+  color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rg-meta b { color: var(--ink-2); font-weight: 650; }
+.rg-hint { display: flex; align-items: center; gap: 6px; margin: 8px 2px 0; font-size: 11px; color: var(--ink-3); }
+.rg-hint kbd {
+  padding: 0 5px; border: 1px solid #334155; border-bottom-width: 2px; border-radius: 4px;
+  background: var(--panel); color: var(--ink-2); font: 600 10px/1.5 Inter, system-ui, sans-serif;
+}
+.rg-hint b { color: var(--ink-2); }
+
+/* ---------- Sidebar: no busy fade or spinner ----------
+   Sidebar outputs re-render on every filter change. Shiny's busy
+   indicator would fade them and add a spinner (with a min-height),
+   which made the sidebar jump when switching US / Global. */
+.sidebar .recalculating, .sidebar .recalculating > * {
+  opacity: 1 !important; transition: none !important; min-height: 0 !important;
+}
+.sidebar .recalculating::before, .sidebar .recalculating::after { content: none !important; display: none !important; }
+
+/* ---------- Sidebar rhythm ---------- */
+.bslib-sidebar-layout > .sidebar > .sidebar-content { gap: 12px !important; }
+.sidebar .sb-section-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-3); margin: 16px 2px 7px;
+}
+
+/* ---------- Segmented toggles ----------
+   Shiny's inline radios render as label.radio-inline > input + span,
+   so style that markup (and the Bootstrap form-check markup, just in case). */
+.seg-toggle .form-group, .seg-toggle .shiny-input-container { margin: 0 !important; width: 100% !important; }
+.seg-toggle .shiny-options-group {
+  display: flex; gap: 2px; padding: 3px; border-radius: 10px;
+  background: #080C12; border: 1px solid var(--line-2);
+}
+.seg-toggle .radio-inline, .seg-toggle .form-check, .seg-toggle .form-check-inline {
+  flex: 1; position: relative; margin: 0 !important; padding: 0 !important; min-height: 0;
+}
+.seg-toggle input[type=radio] {
+  position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none;
+}
+.seg-toggle .radio-inline > span, .seg-toggle .form-check-label {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 7px 6px; border-radius: 7px; cursor: pointer; user-select: none;
+  font-size: 13px; font-weight: 600; color: var(--ink-3); white-space: nowrap;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.seg-toggle .radio-inline:hover > span { color: var(--ink); background: rgba(148,163,184,.08); }
+.seg-toggle input:checked + span, .seg-toggle input:checked + .form-check-label {
+  background: linear-gradient(135deg, #3B82F6, #2563EB); color: #fff;
+  box-shadow: 0 4px 12px rgba(59,130,246,.35);
+}
+.seg-toggle input:focus-visible + span { outline: 2px solid var(--blue-2); outline-offset: 1px; }
+.seg-toggle .fa, .seg-toggle svg { font-size: 12px; }
+.seg-mini .radio-inline > span { padding: 4px 4px; font-size: 12px; }
+
+/* ---------- Summary card ---------- */
+.sb-summary { padding: 12px 14px !important; margin-bottom: 0 !important; }
+.sb-summary-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sb-summary-main { font-size: 13px; color: var(--ink-2); }
+.sb-summary-main b { font-size: 24px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.sb-summary-tag {
+  flex: none; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 999px;
+  color: #86EFAC; background: rgba(34,197,94,.10); border: 1px solid rgba(34,197,94,.3);
+}
+.sb-summary-tag.is-filtered { color: #BFDBFE; background: rgba(59,130,246,.14); border-color: rgba(96,165,250,.4); }
+.sb-summary-bar { height: 4px; margin-top: 9px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.sb-summary-bar span {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, #60A5FA, #3B82F6); transition: width .4s cubic-bezier(.2,.8,.2,1);
+}
+
+/* ---------- Filter card (Upcoming Capacity: Location) ---------- */
+.pf-card {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px;
+  padding: 12px; transition: border-color .2s ease;
+}
+.pf-card:focus-within { border-color: var(--line-2); }
+.pf-card-head { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+.pf-ic {
+  width: 26px; height: 26px; flex: none; border-radius: 8px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 12px;
+  background: rgba(59,130,246,.14); color: var(--blue-2); box-shadow: inset 0 0 0 1px rgba(96,165,250,.22);
+}
+.pf-title { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+.pf-card-head > .shiny-html-output { margin-left: auto; }
+.pf-status {
+  margin-left: auto; font-size: 11px; font-weight: 600; color: var(--ink-3);
+  padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line-2);
+}
+.pf-status.is-set { color: #BFDBFE; border-color: rgba(96,165,250,.45); background: rgba(59,130,246,.12); }
+.pf-field-label { margin: 12px 2px 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-3); }
+.pf-card .form-group, .pf-card .shiny-input-container { margin-bottom: 0 !important; width: 100% !important; }
+.pf-select { position: relative; }
+.pf-select-ic {
+  position: absolute; left: 12px; top: 12px; z-index: 3; pointer-events: none;
+  font-size: 12px; color: var(--ink-3);
+}
+.pf-select:focus-within .pf-select-ic { color: var(--blue-2); }
+.pf-card .selectize-input {
+  min-height: 40px; padding: 8px 10px 5px 34px !important; border-radius: 10px !important;
+  font-size: 13px; line-height: 20px;
+}
+.pf-card .selectize-input > input::placeholder { color: var(--ink-3); }
+.pf-card .selectize-input > .item {
+  margin: 0 4px 3px 0 !important; padding: 0 2px 0 8px !important; border-radius: 6px !important;
+  background: rgba(59,130,246,.16) !important; color: #DBEAFE !important;
+  border: 1px solid rgba(96,165,250,.35) !important; font-size: 12px; font-weight: 600;
+}
+.pf-card .selectize-input > .item .remove {
+  border-left: 1px solid rgba(96,165,250,.3) !important; color: #93C5FD !important; margin-left: 6px;
+}
+.pf-card .selectize-input > .item .remove:hover { background: rgba(239,68,68,.18) !important; color: #FCA5A5 !important; }
+.pf-card + .pf-card { margin-top: 4px; }
+.pf-clear {
+  margin-left: 6px; display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px;
+  border-radius: 999px; border: 1px solid var(--line-2); background: transparent;
+  color: var(--ink-2); font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.pf-clear:hover { border-color: var(--blue); color: #fff; }
+
+/* ---------- Quarter grid (Upcoming Capacity: Timing) ---------- */
+.qg { display: flex; flex-direction: column; gap: 5px; user-select: none; -webkit-user-select: none; }
+.qg-row { display: grid; grid-template-columns: 50px repeat(4, minmax(0, 1fr)); gap: 5px; }
+.qg-year {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  border-radius: 9px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink-2); font-size: 12px; font-weight: 750; cursor: pointer; padding: 0;
+  font-variant-numeric: tabular-nums; transition: all .15s ease;
+}
+.qg-year small { font-size: 9px; font-weight: 600; color: var(--ink-3); letter-spacing: .04em; }
+.qg-year:hover { border-color: var(--blue); color: #fff; }
+.qg-year.is-partial { border-color: rgba(96,165,250,.55); color: #BFDBFE; }
+.qg-year.is-on { background: rgba(59,130,246,.18); border-color: var(--blue); color: #fff; }
+.qg-year.is-on small, .qg-year.is-partial small { color: #93C5FD; }
+.qg-cell {
+  --h: 0%;
+  position: relative; height: 46px; padding: 0; overflow: hidden; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  border-radius: 9px; border: 1px solid var(--line); color: var(--ink);
+  background: linear-gradient(to top, rgba(59,130,246,.20) var(--h), var(--panel) var(--h));
+  transition: transform .12s ease, border-color .15s ease, box-shadow .15s ease, opacity .15s ease;
+}
+.qg-cell:hover { transform: translateY(-1px); border-color: var(--blue-2); }
+.qg-cell:active { transform: scale(.97); }
+.qg-cell:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 1px; }
+.qg-q { font-size: 11.5px; font-weight: 750; letter-spacing: .02em; }
+.qg-mw { font-size: 9.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.qg-cell.is-on {
+  border-color: #3B82F6; color: #fff;
+  background: linear-gradient(to top, rgba(147,197,253,.30) var(--h), #2563EB var(--h));
+  box-shadow: 0 4px 12px rgba(59,130,246,.35);
+}
+.qg-cell.is-on .qg-mw { color: #DBEAFE; }
+.qg.has-sel .qg-cell:not(.is-on):not(.is-none) { opacity: .6; }
+.qg.has-sel .qg-cell:not(.is-on):not(.is-none):hover { opacity: 1; }
+.qg-cell.is-zero .qg-mw { color: #475569; }
+.qg-cell.is-past::after {
+  content: ""; position: absolute; top: 5px; right: 5px; width: 5px; height: 5px;
+  border-radius: 50%; background: #F59E0B;
+}
+.qg-cell.is-now { box-shadow: inset 0 0 0 1px rgba(45,212,191,.55); }
+.qg-cell.is-none {
+  cursor: default; background: transparent; border-style: dashed; color: #334155; opacity: .55;
+}
+.qg-cell.is-none:hover { transform: none; border-color: var(--line); }
+.qg-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line-2);
+}
+.qg-legend { display: flex; gap: 10px; font-size: 10.5px; color: var(--ink-3); }
+.qg-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.qg-legend i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.qg-hint { margin-top: 8px; font-size: 11px; color: var(--ink-3); }
+.qg-hint kbd {
+  padding: 0 5px; border: 1px solid #334155; border-bottom-width: 2px; border-radius: 4px;
+  background: var(--panel); color: var(--ink-2); font: 600 10px/1.5 Inter, system-ui, sans-serif;
+}
+.qg-hidden { display: none !important; }
+
+/* "Include past quarters" as a small switch */
+.pf-switch .form-group, .pf-switch .shiny-input-container { margin: 0 !important; width: auto !important; }
+.pf-switch .checkbox, .pf-switch .form-check { margin: 0; padding: 0; min-height: 0; }
+.pf-switch label {
+  display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 0; cursor: pointer;
+  font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap;
+}
+.pf-switch input[type=checkbox] {
+  -webkit-appearance: none; appearance: none; position: relative; flex: none; margin: 0;
+  width: 30px; height: 17px; border-radius: 999px; border: 0; cursor: pointer;
+  background: var(--line-2); transition: background .18s ease;
+}
+.pf-switch input[type=checkbox]::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); transition: transform .18s cubic-bezier(.2,.8,.2,1);
+}
+.pf-switch input[type=checkbox]:checked { background: #F59E0B; }
+.pf-switch input[type=checkbox]:checked::after { transform: translateX(13px); }
+.pf-switch input[type=checkbox]:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 2px; }
+.pf-card .sb-note { margin: 8px 2px 0; }
+
+/* ---------- Last refresh card (bottom of the sidebar) ---------- */
+.fr-card {
+  --fr: #22C55E;
+  display: flex; align-items: center; gap: 11px; margin-top: 2px; padding: 10px 12px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--panel-2);
+  text-decoration: none !important; color: var(--ink); cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.fr-card:hover { border-color: var(--line-2); background: #16202E; }
+.fr-card:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 2px; }
+.fr-card.is-week { --fr: #F59E0B; }
+.fr-card.is-old  { --fr: #64748B; }
+.fr-ic {
+  width: 30px; height: 30px; flex: none; border-radius: 9px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 12px; color: var(--fr);
+  background: color-mix(in srgb, var(--fr) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fr) 28%, transparent);
+}
+.fr-txt { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.3; }
+.fr-label {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3);
+}
+.fr-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fr);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--fr) 20%, transparent); }
+.fr-main { font-size: 13.5px; font-weight: 700; color: #F1F5F9; }
+.fr-sub { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fr-ver {
+  flex: none; align-self: flex-start; font-size: 10.5px; font-weight: 700; color: var(--ink-2);
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2); font-variant-numeric: tabular-nums;
+}
+)---"
+
+REGION_JS <- r"---(
+$(document).on('click', '.rg-tile', function(e) {
+  Shiny.setInputValue('pipeline_region_toggle', {
+    region: this.getAttribute('data-region'),
+    only: !!(e.altKey || e.metaKey),
+    n: Date.now()
+  }, { priority: 'event' });
+});
+$(document).on('click', '.qg-cell[data-q]', function(e) {
+  Shiny.setInputValue('quarter_toggle', { q: this.getAttribute('data-q'), shift: !!e.shiftKey, n: Date.now() },
+                      { priority: 'event' });
+});
+$(document).on('click', '.qg-year', function() {
+  Shiny.setInputValue('year_toggle', { year: this.getAttribute('data-year'), n: Date.now() }, { priority: 'event' });
+});
+$(document).on('click', '.qg-clear', function() {
+  Shiny.setInputValue('quarter_clear', Date.now(), { priority: 'event' });
+});
+$(document).on('click', '.rg-clear', function() {
+  Shiny.setInputValue('pipeline_region_clear', Date.now(), { priority: 'event' });
+});
+)---"
+
+# Tile colour per region: US sub-regions get distinct blues, the rest
+# use the same colours as the client PDF
+region_tile_colors <- function(regions) {
+  us_pal <- c("#3B82F6", "#38BDF8", "#818CF8", "#60A5FA", "#22D3EE", "#6366F1", "#93C5FD", "#0EA5E9")
+  is_us <- startsWith(regions, "USA")
+  out <- vapply(strsplit(client_region_colors(regions), "|", fixed = TRUE), `[`, character(1), 1)
+  out[is_us] <- us_pal[(seq_len(sum(is_us)) - 1) %% length(us_pal) + 1]
+  out[regions == "United States"] <- "#3B82F6"
+  out
+}
+
+# Global view: the whole US is one region, then the world regions
+world_region_order <- function(regions) {
+  regions <- unique(regions[!is.na(regions)])
+  pref <- c("United States", names(CLIENT_PDF_WORLD_REGIONS), "Other")
+  c(intersect(pref, regions), sort(setdiff(regions, pref)))
+}
+
 # ============================================================
 # UI
 # ============================================================
@@ -4649,8 +5041,7 @@ ui <- page_sidebar(
         tags$a(class = "pill", href = SHAREPOINT_URL, target = "_blank", rel = "noopener",
                icon("file-excel"), "Master workbook")
       },
-      uiOutput("hdr_flags", inline = TRUE),
-      uiOutput("hdr_fresh", inline = TRUE)
+      uiOutput("hdr_flags", inline = TRUE)
     )
   ),
   
@@ -4675,6 +5066,8 @@ ui <- page_sidebar(
     tags$script(HTML(EMP_PDF_JS)),
     tags$script(HTML(CONTACT_JS)),
     tags$style(HTML(CONTACT_CSS)),
+    tags$style(HTML(REGION_CSS)),
+    tags$script(HTML(REGION_JS)),
     tags$style(HTML(POLISH_CSS))
   ),
   
@@ -4705,7 +5098,7 @@ ui <- page_sidebar(
         tags$span(class = "sb-search-icon", icon("magnifying-glass")),
         textInput(
           "global_search", NULL, width = "100%",
-          placeholder = "Search operator, city, state, country"
+          placeholder = "Search operators, cities..."
         ),
         tags$kbd(class = "sb-search-kbd", "/"),
         tags$button(
@@ -4783,35 +5176,57 @@ ui <- page_sidebar(
     conditionalPanel(
       condition = "input.main_tabs == 'Upcoming Capacity'",
       
-      div(class = "sb-section-label", "Scope"),
-      div(class = "seg-toggle",
-          radioButtons("pipeline_scope", NULL,
-                       choices = c("US only" = "us", "Global" = "global"),
-                       selected = "global", inline = TRUE)),
-      
-      conditionalPanel(
-        condition = "input.pipeline_scope == 'us'",
-        div(class = "sb-section-label", "State"),
-        selectizeInput("pipeline_state_filter", NULL, choices = NULL, multiple = TRUE,
-                       options = list(placeholder = "All states",
-                                      plugins = list("remove_button")))
+      div(
+        class = "pf-card",
+        div(class = "pf-card-head",
+            span(class = "pf-ic", icon("location-dot")),
+            span(class = "pf-title", "Location"),
+            uiOutput("pipeline_loc_status", inline = TRUE)),
+        div(class = "seg-toggle",
+            radioButtons("pipeline_scope", NULL, inline = TRUE, selected = "global",
+                         choiceNames = list(tagList(icon("flag-usa"), "US only"),
+                                            tagList(icon("earth-americas"), "Global")),
+                         choiceValues = c("us", "global"))),
+        conditionalPanel(
+          condition = "input.pipeline_scope == 'us'",
+          div(class = "pf-field-label", "States"),
+          div(class = "pf-select",
+              span(class = "pf-select-ic", icon("magnifying-glass")),
+              selectizeInput("pipeline_state_filter", NULL, choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All states",
+                                            plugins = list("remove_button"))))
+        ),
+        conditionalPanel(
+          condition = "input.pipeline_scope == 'global'",
+          div(class = "pf-field-label", "Countries"),
+          div(class = "pf-select",
+              span(class = "pf-select-ic", icon("magnifying-glass")),
+              selectizeInput("pipeline_country_filter", NULL, choices = NULL, multiple = TRUE,
+                             options = list(placeholder = "All countries",
+                                            plugins = list("remove_button"))))
+        )
       ),
       
-      conditionalPanel(
-        condition = "input.pipeline_scope == 'global'",
-        div(class = "sb-section-label", "Country"),
-        selectizeInput("pipeline_country_filter", NULL, choices = NULL, multiple = TRUE,
-                       options = list(placeholder = "All countries",
-                                      plugins = list("remove_button")))
-      ),
+      uiOutput("pipeline_region_picker"),
       
-      div(class = "sb-section-label", "Timing"),
-      uiOutput("year_presets"),
-      selectizeInput("quarter_filter", NULL, choices = NULL, multiple = TRUE,
-                     options = list(placeholder = "All quarters",
-                                    plugins = list("remove_button"))),
-      checkboxInput("pipeline_include_past", "Include past quarters", value = FALSE),
-      uiOutput("past_note"),
+      div(
+        class = "pf-card",
+        div(class = "pf-card-head",
+            span(class = "pf-ic", icon("calendar-days")),
+            span(class = "pf-title", "Timing"),
+            uiOutput("quarter_status", inline = TRUE)),
+        uiOutput("quarter_grid"),
+        # The grid drives this hidden list, which every filter and PDF reads
+        div(class = "qg-hidden",
+            selectizeInput("quarter_filter", NULL, choices = NULL, multiple = TRUE)),
+        div(class = "qg-foot",
+            div(class = "pf-switch",
+                checkboxInput("pipeline_include_past", "Show past quarters", value = FALSE)),
+            div(class = "qg-legend",
+                span(tags$i(style = "background:#2DD4BF"), "Now"),
+                span(tags$i(style = "background:#F59E0B"), "Past"))),
+        uiOutput("past_note")
+      ),
       
       div(class = "sb-section-label", "MW available"),
       range_slider("pipeline_mw_filter", 0, 100, c(0, 100), step = 0.1)
@@ -4820,7 +5235,7 @@ ui <- page_sidebar(
     hr(),
     actionButton("reset_filters", "Reset all filters",
                  icon = icon("rotate-left"), class = "w-100"),
-    div(class = "sb-footer", textOutput("data_freshness"))
+    uiOutput("data_freshness")
   ),
   
   # ==========================================================
@@ -5221,7 +5636,11 @@ main_server <- function(input, output, session) {
   
   # What the Upcoming Capacity tab works from (past quarters are opt-in)
   pipeline_base <- reactive({
-    if (isTRUE(input$pipeline_include_past)) raw_pipeline() else pipeline_active()
+    df <- if (isTRUE(input$pipeline_include_past)) raw_pipeline() else pipeline_active()
+    df %>% mutate(
+      Region_Group = client_region(State, Country, Region),               # "USA – South West", "EMEA"...
+      Region_World = if_else(startsWith(Region_Group, "USA"), "United States", Region_Group)
+    )
   })
   
   # Quarter labels available in the sheet, in date order
@@ -5261,20 +5680,6 @@ main_server <- function(input, output, session) {
     if (nrow(v) == 0) NULL else v[1, ]
   })
   
-  output$hdr_fresh <- renderUI({
-    v <- last_update()
-    
-    if (is.null(v)) {
-      return(span(class = "pill", "No data loaded yet"))
-    }
-    
-    span(
-      class = "pill", title = "When the data was last imported",
-      span(class = "live-dot"),
-      paste0("Updated ", substr(v$timestamp, 1, 16), " (v", v$version, ")")
-    )
-  })
-  
   import_flags <- reactive({
     refresh_trigger()
     load_import_flags()
@@ -5299,10 +5704,44 @@ main_server <- function(input, output, session) {
     bslib::nav_select("main_tabs", "Version History", session = session)
   })
   
-  output$data_freshness <- renderText({
+  # Last refresh card (bottom of the sidebar). "12 min ago" updates every minute.
+  output$data_freshness <- renderUI({
+    invalidateLater(60 * 1000, session)
     v <- last_update()
-    if (is.null(v)) return("No data loaded yet")
-    paste0("Data refreshed ", substr(v$timestamp, 1, 16), " \u00b7 v", v$version)
+    
+    if (is.null(v)) {
+      return(div(class = "fr-card is-old",
+                 span(class = "fr-ic", icon("database")),
+                 div(class = "fr-txt",
+                     span(class = "fr-label", "Data"),
+                     span(class = "fr-main", "No data loaded yet"))))
+    }
+    
+    ts <- suppressWarnings(as.POSIXct(substr(v$timestamp, 1, 19), format = "%Y-%m-%d %H:%M:%S"))
+    mins <- if (is.na(ts)) NA_real_ else as.numeric(difftime(Sys.time(), ts, units = "mins"))
+    
+    # Green: today, amber: this week, gray: older
+    tone <- if (is.na(mins) || mins >= 7 * 1440) "is-old" else if (mins >= 1440) "is-week" else "is-fresh"
+    
+    when <- if (is.na(ts)) "" else paste0(
+      format(ts, "%b "), as.integer(format(ts, "%d")), format(ts, ", %Y \u00b7 "),
+      sub("^0", "", format(ts, "%I:%M %p"))
+    )
+    
+    tags$a(
+      class = paste("fr-card", tone), href = "#", role = "button",
+      title = paste0("Last import: ", v$timestamp, " (version ", v$version, "). Click for version history."),
+      onclick = "Shiny.setInputValue('go_history', Date.now(), {priority: 'event'}); return false;",
+      span(class = "fr-ic", icon("rotate")),
+      div(class = "fr-txt",
+          span(class = "fr-label", span(class = "fr-dot"), "Data updated"),
+          span(class = "fr-main", if (nzchar(when)) when else substr(v$timestamp, 1, 16))),
+      span(class = "fr-ver", paste0("v", v$version))
+    )
+  })
+  
+  observeEvent(input$go_history, {
+    bslib::nav_select("main_tabs", "Version History", session = session)
   })
   
   # ----------------------------------------------------------
@@ -5570,11 +6009,33 @@ main_server <- function(input, output, session) {
       label <- "sites"
     }
     
+    pct <- if (total > 0) round(100 * n / total) else 0
+    is_filtered <- n < total
+    
     div(
       class = "sb-summary",
-      div(class = "sb-summary-main",
-          tags$b(fmt(n)), paste0(" of ", fmt(total), " ", label))
+      div(class = "sb-summary-top",
+          div(class = "sb-summary-main",
+              tags$b(fmt(n)), paste0(" of ", fmt(total), " ", label)),
+          span(class = paste("sb-summary-tag", if (is_filtered) "is-filtered"),
+               if (is_filtered) paste0(pct, "% shown") else "Showing all")),
+      div(class = "sb-summary-bar", span(style = sprintf("width:%d%%", as.integer(pct))))
     )
+  })
+  
+  # Status pill on the Upcoming Capacity "Location" card
+  output$pipeline_loc_status <- renderUI({
+    us <- identical(input$pipeline_scope, "us")
+    picked <- if (us) input$pipeline_state_filter else input$pipeline_country_filter
+    n <- length(picked)
+    txt <- if (n == 0) {
+      if (us) "All states" else "Worldwide"
+    } else if (n == 1) {
+      picked
+    } else {
+      paste(n, if (us) "states" else "countries")
+    }
+    span(class = paste("pf-status", if (n > 0) "is-set"), txt)
   })
   
   output$search_status <- renderUI({
@@ -5712,6 +6173,7 @@ main_server <- function(input, output, session) {
     }
     
     highlight_on(FALSE)
+    pipeline_regions(character(0))
     updateTextInput(session, "global_search", value = "")
     
     gmax <- suppressWarnings(max(raw_data()$Capacity_MW_est, na.rm = TRUE))
@@ -5758,8 +6220,18 @@ main_server <- function(input, output, session) {
   # the search bar applies to both tabs)
   # ----------------------------------------------------------
   
-  filtered_pipeline <- reactive({
-    df <- pipeline_base()
+  # Selected regions (empty = all regions)
+  pipeline_regions <- reactiveVal(character(0))
+  
+  # US only -> US sub-regions; Global -> United States + world regions
+  region_field <- reactive({
+    if (identical(input$pipeline_scope, "us")) "Region_Group" else "Region_World"
+  })
+  
+  # Every Upcoming Capacity filter except Region. The region tiles count
+  # from this, so each tile shows what you'd get by turning it on.
+  # All Upcoming Capacity filters except Region (and, if asked, except Quarter)
+  pipeline_apply_filters <- function(df, use_quarters = TRUE) {
     
     if (identical(input$pipeline_scope, "us")) {
       df <- df %>% filter(is_us)
@@ -5771,7 +6243,7 @@ main_server <- function(input, output, session) {
       df <- df %>% filter(Country %in% input$pipeline_country_filter)
     }
     
-    if (length(input$quarter_filter) > 0) {
+    if (use_quarters && length(input$quarter_filter) > 0) {
       df <- df %>% filter(Quarter %in% input$quarter_filter)
     }
     
@@ -5783,11 +6255,110 @@ main_server <- function(input, output, session) {
         )
     }
     
-    df <- apply_search(df, c("Operator", "City_clean", "State", "Country",
-                             "Region", "Quarter"))
-    
+    apply_search(df, c("Operator", "City_clean", "State", "Country",
+                       "Region", "Region_Group", "Quarter"))
+  }
+  
+  pipeline_pre_region <- reactive(pipeline_apply_filters(pipeline_base()))
+  
+  filtered_pipeline <- reactive({
+    df <- pipeline_pre_region()
+    sel <- pipeline_regions()
+    if (length(sel) > 0) df <- df[df[[region_field()]] %in% sel, ]
     df %>% arrange(Quarter_Date, Operator, Country, State, City_clean)
   })
+  
+  # ---- Region tiles ----
+  pipeline_region_stats <- reactive({
+    base <- pipeline_base()
+    fld <- region_field()
+    regs <- if (fld == "Region_Group") {
+      client_region_order(base$Region_Group[base$is_us])
+    } else {
+      world_region_order(base$Region_World)
+    }
+    if (length(regs) == 0) {
+      return(tibble(Region = character(), n = integer(), mw = double()))
+    }
+    st <- pipeline_pre_region() %>%
+      group_by(Region = .data[[fld]]) %>%
+      summarise(n = n(), mw = sum(MW_available, na.rm = TRUE), .groups = "drop")
+    tibble(Region = regs) %>%
+      left_join(st, by = "Region") %>%
+      mutate(n = coalesce(n, 0L), mw = coalesce(mw, 0))
+  })
+  
+  output$pipeline_region_picker <- renderUI({
+    st <- pipeline_region_stats()
+    if (nrow(st) == 0) return(NULL)
+    
+    sel <- intersect(pipeline_regions(), st$Region)
+    cols <- region_tile_colors(st$Region)
+    mx <- max(st$mw, 1)
+    mw_short <- function(x) if (x > 0 && x < 1) fmt_cap(x) else paste(fmt(x), "MW")
+    
+    tile <- function(i) {
+      r <- st$Region[i]
+      on <- r %in% sel
+      empty <- st$n[i] == 0 && !on
+      nm <- sub("^USA\\s*\u2013\\s*", "", r)
+      w <- if (st$mw[i] > 0) max(4L, as.integer(round(100 * st$mw[i] / mx))) else 0L
+      tags$button(
+        type = "button",
+        class = paste("rg-tile", if (on) "is-on", if (empty) "is-empty"),
+        style = paste0("--rg:", cols[i]),
+        `data-region` = r,
+        `aria-pressed` = if (on) "true" else "false",
+        title = paste0(r, ": ", st$n[i], if (st$n[i] == 1) " entry, " else " entries, ",
+                       mw_short(st$mw[i]), " with the other filters applied"),
+        div(class = "rg-top",
+            span(class = "rg-dot"),
+            span(class = "rg-name", nm),
+            span(class = "rg-check", icon("check"))),
+        div(class = "rg-bar", span(style = sprintf("width:%d%%", w))),
+        div(class = "rg-meta",
+            span(tags$b(st$n[i]), if (st$n[i] == 1) " entry" else " entries"),
+            span(mw_short(st$mw[i])))
+      )
+    }
+    
+    grid_cls <- paste("rg-grid", if (length(sel)) "has-sel")
+    
+    tagList(
+      div(class = "rg-head",
+          span(class = "sb-section-label", "Region"),
+          if (length(sel)) {
+            tags$button(type = "button", class = "rg-clear", icon("xmark"), "Clear")
+          } else {
+            span(class = "rg-status", "All regions")
+          }),
+      div(class = grid_cls, lapply(seq_len(nrow(st)), tile)),
+      div(class = "rg-hint",
+          if (length(sel)) span(tags$b(length(sel)), paste0(" of ", nrow(st), " selected \u00b7 ")),
+          span(tags$kbd("Alt"), " + click to show only one"))
+    )
+  })
+  
+  observeEvent(input$pipeline_region_toggle, {
+    t <- input$pipeline_region_toggle
+    r <- t$region
+    req(r)
+    sel <- pipeline_regions()
+    new <- if (isTRUE(t$only)) {
+      if (identical(sel, r)) character(0) else r
+    } else if (r %in% sel) {
+      setdiff(sel, r)
+    } else {
+      c(sel, r)
+    }
+    pipeline_regions(if (region_field() == "Region_Group") client_region_order(new)
+                     else world_region_order(new))
+  })
+  
+  observeEvent(input$pipeline_region_clear, pipeline_regions(character(0)))
+  
+  # US only and Global use different region lists, so switching clears the pick
+  observeEvent(input$pipeline_scope, pipeline_regions(character(0)), ignoreInit = TRUE)
   
   observeEvent(raw_pipeline(), {
     max_mw <- suppressWarnings(max(raw_pipeline()$MW_available, na.rm = TRUE))
@@ -5799,32 +6370,121 @@ main_server <- function(input, output, session) {
                       max = ceiling(max_mw), value = c(0, ceiling(max_mw)))
   }, ignoreNULL = FALSE)
   
-  # ---- Year shortcut buttons: one per year found in the sheet, additive ----
+  # ---- Quarter grid: one row per year, Q1-Q4 cells with MW arriving ----
   
-  output$year_presets <- renderUI({
+  # MW per quarter with every other filter (incl. Region) applied
+  quarter_stats <- reactive({
+    df <- pipeline_apply_filters(pipeline_base(), use_quarters = FALSE)
+    sel <- pipeline_regions()
+    if (length(sel) > 0) df <- df[df[[region_field()]] %in% sel, ]
+    df %>%
+      group_by(Quarter) %>%
+      summarise(n = n(), mw = sum(MW_available, na.rm = TRUE), .groups = "drop")
+  })
+  
+  output$quarter_status <- renderUI({
+    sel <- input$quarter_filter %||% character(0)
+    if (length(sel) == 0) {
+      lbl <- if (isTRUE(input$pipeline_include_past)) "All quarters" else "All upcoming"
+      return(span(class = "pf-status", lbl))
+    }
+    tagList(
+      span(class = "pf-status is-set",
+           if (length(sel) == 1) sel else paste(length(sel), "quarters")),
+      tags$button(type = "button", class = "pf-clear qg-clear",
+                  title = "Clear quarters", icon("xmark"))
+    )
+  })
+  
+  output$quarter_grid <- renderUI({
     qs <- quarter_choices()
-    if (length(qs) == 0) return(NULL)
+    if (length(qs) == 0) {
+      return(div(class = "sb-note", icon("calendar-xmark"), span("No upcoming quarters in the sheet.")))
+    }
     
-    yrs <- format(quarter_to_date(qs), "%Y")
-    selected <- input$quarter_filter %||% character(0)
+    sel <- input$quarter_filter %||% character(0)
+    st <- quarter_stats()
+    mx <- max(st$mw, 1)
+    now_q <- quarter_label(today_q())
+    mw_short <- function(x) if (x <= 0) "–" else if (x < 1) fmt_cap(x) else paste(fmt(x), "MW")
     
-    div(
-      class = "sb-presets",
-      lapply(unique(yrs), function(y) {
-        year_qs <- qs[yrs == y]
-        is_active <- length(selected) > 0 && all(year_qs %in% selected)
-        
+    yrs <- unique(format(quarter_to_date(qs), "%Y"))
+    
+    rows <- lapply(yrs, function(y) {
+      year_qs <- qs[startsWith(qs, "Q") & substr(qs, 4, 7) == y]
+      n_on <- sum(year_qs %in% sel)
+      y_mw <- sum(st$mw[st$Quarter %in% year_qs])
+      
+      cells <- lapply(1:4, function(k) {
+        q <- paste0("Q", k, " ", y)
+        if (!q %in% qs) {
+          return(div(class = "qg-cell is-none", `aria-hidden` = "true",
+                     span(class = "qg-q", paste0("Q", k))))
+        }
+        i <- match(q, st$Quarter)
+        mw <- if (is.na(i)) 0 else st$mw[i]
+        n <- if (is.na(i)) 0L else st$n[i]
+        on <- q %in% sel
+        h <- if (mw > 0) max(8L, as.integer(round(100 * mw / mx))) else 0L
         tags$button(
           type = "button",
-          class = paste("btn btn-sm btn-outline-primary", if (is_active) "is-active"),
-          `aria-pressed` = if (is_active) "true" else "false",
-          onclick = sprintf(
-            "Shiny.setInputValue('year_toggle', {year: '%s'}, {priority: 'event'});", y
-          ),
-          y
+          class = paste("qg-cell", if (on) "is-on", if (mw <= 0) "is-zero",
+                        if (identical(q, now_q)) "is-now",
+                        if (quarter_to_date(q) < today_q()) "is-past"),
+          style = sprintf("--h:%d%%", h),
+          `data-q` = q,
+          `aria-pressed` = if (on) "true" else "false",
+          title = paste0(q, ": ", n, if (n == 1) " entry, " else " entries, ", mw_short(mw)),
+          span(class = "qg-q", paste0("Q", k)),
+          span(class = "qg-mw", mw_short(mw))
         )
       })
+      
+      div(class = "qg-row",
+          tags$button(
+            type = "button",
+            class = paste("qg-year",
+                          if (n_on > 0 && n_on == length(year_qs)) "is-on"
+                          else if (n_on > 0) "is-partial"),
+            `data-year` = y,
+            title = paste0("Select all of ", y, " (", mw_short(y_mw), ")"),
+            y, tags$small(mw_short(y_mw))),
+          cells)
+    })
+    
+    tagList(
+      div(class = paste("qg", if (length(sel)) "has-sel"), rows),
+      div(class = "qg-hint", "Click a year for all 4 quarters · ",
+          tags$kbd("Shift"), " + click for a range")
     )
+  })
+  
+  quarter_anchor <- reactiveVal(NULL)
+  
+  observeEvent(input$quarter_toggle, {
+    t <- input$quarter_toggle
+    q <- t$q
+    req(q)
+    qs <- quarter_choices()
+    sel <- input$quarter_filter %||% character(0)
+    anchor <- quarter_anchor()
+    
+    new_sel <- if (isTRUE(t$shift) && !is.null(anchor) && anchor %in% qs) {
+      i <- match(c(anchor, q), qs)
+      union(sel, qs[min(i):max(i)])
+    } else if (q %in% sel) {
+      setdiff(sel, q)
+    } else {
+      c(sel, q)
+    }
+    
+    quarter_anchor(q)
+    updateSelectizeInput(session, "quarter_filter", selected = qs[qs %in% new_sel])
+  })
+  
+  observeEvent(input$quarter_clear, {
+    quarter_anchor(NULL)
+    updateSelectizeInput(session, "quarter_filter", selected = character(0))
   })
   
   observeEvent(input$year_toggle, {
@@ -6507,13 +7167,14 @@ main_server <- function(input, output, session) {
     leafletProxy("pipeline_map") %>% fit_points(pts$map_lat, pts$map_lng)
   }, ignoreInit = TRUE)
   
-  # Picking states / countries zooms to them; clearing them resets the view
+  # Picking states / countries / regions zooms to them; clearing them resets the view
   observeEvent(
-    list(input$pipeline_state_filter, input$pipeline_country_filter),
+    list(input$pipeline_state_filter, input$pipeline_country_filter, pipeline_regions()),
     {
       req(identical(input$main_tabs, "Upcoming Capacity"), isTRUE(pipeline_map_ready()))
       
-      if (length(c(input$pipeline_state_filter, input$pipeline_country_filter)) == 0) {
+      if (length(c(input$pipeline_state_filter, input$pipeline_country_filter,
+                   pipeline_regions())) == 0) {
         reset_pipeline_view()
         return()
       }
@@ -6835,6 +7496,7 @@ main_server <- function(input, output, session) {
       emp_filter("Scope", if (us) "US only" else character(0), default = "Global"),
       if (us) emp_filter("States", input$pipeline_state_filter, default = "All states")
       else    emp_filter("Countries", input$pipeline_country_filter, default = "All countries"),
+      emp_filter("Regions", pipeline_regions(), default = "All regions"),
       emp_filter("Delivery quarters", qs,
                  default = paste(quarter_label(today_q()), "onward")),
       emp_filter("MW available", emp_mw_values(input$pipeline_mw_filter, pipe_slider_max()),
@@ -6915,6 +7577,17 @@ main_server <- function(input, output, session) {
       paste(quarter_label(today_q()), "onward")
     }
     
+    # ---- Regions (scrubbed like every other client-facing text) ----
+    regions <- pipeline_regions()
+    if (length(regions)) {
+      regions <- scrub_operators(regions, unique(c(raw_data()$Operator, raw_pipeline()$Operator)))
+      regions <- regions[nzchar(regions)]
+    }
+    reg_set <- length(regions) > 0
+    if (reg_set && !loc_set) {
+      file_tag <- paste(head(sub("^USA\\s*\u2013\\s*", "US-", regions), 3), collapse = "-")
+    }
+    
     # ---- Search keyword (operator names never reach the client) ----
     kw <- str_squish(gsub('"', "", search_raw_d(), fixed = TRUE))
     if (nzchar(kw)) {
@@ -6925,6 +7598,7 @@ main_server <- function(input, output, session) {
     }
     
     footer_bits <- c(loc_line,
+                     if (reg_set) human_list(regions, 3) else "",
                      if (mw_set) mw_txt else "",
                      if (win_set) win_txt else "")
     
@@ -6934,7 +7608,8 @@ main_server <- function(input, output, session) {
       mw_txt = mw_txt, mw_set = mw_set,
       win_txt = win_txt, win_set = win_set,
       keyword = kw,
-      any_set = loc_set || mw_set || win_set || !is.null(kw),
+      regions = regions, reg_set = reg_set,
+      any_set = loc_set || reg_set || mw_set || win_set || !is.null(kw),
       footer_line = paste(footer_bits[nzchar(footer_bits)], collapse = " \u00b7 "),
       file_tag = gsub("[^A-Za-z0-9]+", "-", file_tag)
     )
