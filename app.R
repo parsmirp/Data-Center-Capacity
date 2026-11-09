@@ -2600,8 +2600,7 @@ ct_build_email <- function(operator, rows, to, people, ask = character(0)) {
   site_lines <- vapply(seq_len(nrow(rows)), function(i) {
     r <- rows[i, ]
     detail <- if (!is.na(r$Up_lines) && nzchar(r$Up_lines)) r$Up_lines
-              else if (!is.na(r$MW)) paste(fmt_cap(r$MW), "listed")
-              else "capacity to be confirmed"
+              else "any capacity coming available?"
     paste0("- ", r$Where, ": ", detail)
   }, character(1))
 
@@ -2637,7 +2636,7 @@ ct_build_email <- function(operator, rows, to, people, ask = character(0)) {
 
   intro <- paste0(
     "I'm reaching out from ByteBridge to keep our ", operator, " listings current for clients. ",
-    "Could you confirm whether the capacity below is still available, and share any ",
+    "Could you confirm whether the upcoming capacity below is still available, and share any ",
     "changes to timing or size?"
   )
   ask <- if (any_need) {
@@ -2773,8 +2772,8 @@ window.dcMail = {
   jump: function(el) {
     window.dcMailScroll = true;
     if (window.$ && $.fn) $('.leaflet-popup-close-button').each(function() { this.click(); });
-    Shiny.setInputValue('ct_draft_op', { op: el.getAttribute('data-op'), n: Date.now(), jump: true },
-                        { priority: 'event' });
+    Shiny.setInputValue('ct_draft_op', { op: el.getAttribute('data-op'), site: el.getAttribute('data-site') || '',
+                                         n: Date.now(), jump: true }, { priority: 'event' });
   }
 };
 $(document).on('shown.bs.tab', function() {
@@ -2881,6 +2880,8 @@ CONTACT_CSS <- r"---(
   border-radius: 9px; padding: 6px 12px; font-size: 12.5px; font-weight: 650; transition: all .15s ease;
 }
 .ct-draft-btn:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
+.ct-draft-btn.is-active { background: var(--blue); border-color: var(--blue); color: #fff; box-shadow: 0 6px 16px rgba(59,130,246,.4); }
+.ct-card.is-active { border-color: var(--blue); box-shadow: 0 0 0 1px rgba(59,130,246,.55), 0 14px 30px rgba(59,130,246,.18); }
 .ct-more-wrap { text-align: center; margin-top: 16px; }
 .ct-more-wrap a { color: var(--blue-2); font-weight: 600; text-decoration: none; font-size: 13px; }
 .ct-all-clear { text-align: center; padding: 34px 16px; }
@@ -2917,6 +2918,21 @@ CONTACT_CSS <- r"---(
 #ct_sites label:hover { border-color: var(--line-2); }
 #ct_sites input[type=checkbox] { margin-top: 3px; accent-color: #3B82F6; flex: none; }
 #ct_sites label:has(input:checked) { border-color: rgba(59,130,246,.65); background: rgba(59,130,246,.09); }
+/* Site clicked on the Upcoming Capacity side */
+#ct_sites label:has(.ct-site.is-focus) {
+  border-color: #3B82F6; background: rgba(59,130,246,.16);
+  box-shadow: 0 0 0 1px rgba(59,130,246,.6); animation: ctFocusPulse 1.2s ease-out 2;
+}
+.ct-focus-tag {
+  display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; padding: 0 7px; border-radius: 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: #DBEAFE; background: rgba(59,130,246,.3); vertical-align: middle;
+}
+.ct-focus-tag i, .ct-focus-tag svg { font-size: 9px; }
+@keyframes ctFocusPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(59,130,246,.65); }
+  100% { box-shadow: 0 0 0 12px rgba(59,130,246,0); }
+}
 .ct-site { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .ct-site-top { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .ct-site-name { font-weight: 600; color: #F1F5F9; }
@@ -3297,7 +3313,8 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
       st <- r$sites[[1]] %>% arrange(desc(Days))
       top <- head(st, 3)
       div(
-        class = paste("ct-card", if (r$oldest >= 2 * th) "is-over"),
+        class = paste("ct-card", if (r$oldest >= 2 * th) "is-over",
+                      if (identical(r$Operator, input$ct_operator)) "is-active"),
         div(class = "ct-card-head",
             div(div(class = "ct-card-op", r$Operator),
                 div(class = "ct-card-sub", paste0(r$n_due, " of ", r$n_total,
@@ -3328,8 +3345,13 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
         div(class = "ct-card-foot",
             if (!is.na(r$email)) div(class = "ct-who", icon("at"), r$email)
             else div(class = "ct-who none", icon("triangle-exclamation"), "No email in the sheet"),
-            tags$button(type = "button", class = "ct-draft-btn", `data-op` = r$Operator,
-                        onclick = "dcMail.draft(this)", icon("pen-to-square"), "Draft email"))
+            if (identical(r$Operator, input$ct_operator)) {
+              tags$button(type = "button", class = "ct-draft-btn is-active", `data-op` = r$Operator,
+                          onclick = "dcMail.draft(this)", icon("pen-to-square"), "Drafting")
+            } else {
+              tags$button(type = "button", class = "ct-draft-btn", `data-op` = r$Operator,
+                          onclick = "dcMail.draft(this)", icon("pen-to-square"), "Draft email")
+            })
       )
     })
 
@@ -3370,12 +3392,17 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
     }
     rows <- ct_op_sites()
     th <- ct_threshold()
+    foc <- ct_focus_site()
+    if (!is.null(foc) && !foc %in% rows$key) foc <- NULL
     labels <- lapply(seq_len(nrow(rows)), function(i) {
       r <- rows[i, ]
-      meta <- if (!is.na(r$Up_lines)) r$Up_lines else if (!is.na(r$MW)) paste(fmt_cap(r$MW), "listed") else "No capacity figure"
-      div(class = "ct-site",
+      meta <- if (!is.na(r$Up_lines)) r$Up_lines
+              else if (!is.na(r$MW)) paste0("No upcoming capacity on file (", fmt_cap(r$MW), " total site size)")
+              else "No upcoming capacity on file"
+      div(class = paste("ct-site", if (identical(r$key, foc)) "is-focus"),
           div(class = "ct-site-top",
-              span(class = "ct-site-name", r$Where),
+              span(class = "ct-site-name", r$Where,
+                   if (identical(r$key, foc)) span(class = "ct-focus-tag", icon("arrow-pointer"), "You clicked")),
               if (!is.na(r$Days) && r$Days >= th)
                 span(class = paste("ct-days", if (r$Days >= 2 * th) "ct-old"), paste0(r$Days, "d"))),
           span(class = "ct-site-meta", meta),
@@ -3399,7 +3426,7 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
           actionLink("ct_sel_none", "None")),
       div(class = "ct-site-picker-wrap",
           checkboxGroupInput("ct_sites", NULL, choiceNames = labels, choiceValues = rows$key,
-                             selected = ct_default_keys(rows), width = "100%"))
+                             selected = if (!is.null(foc)) foc else ct_default_keys(rows), width = "100%"))
     )
   })
 
@@ -3408,10 +3435,18 @@ contact_server <- function(input, output, session, raw_data, raw_pipeline, today
   observeEvent(input$ct_sel_none, updateCheckboxGroupInput(session, "ct_sites", selected = character(0)))
 
   # "Draft email" on an operator card: load that operator with its due sites ticked
+  # Site clicked on another tab (Upcoming Capacity row, map popup, match card)
+  ct_focus_site <- reactiveVal(NULL)
+
   observeEvent(input$ct_draft_op, {
     op <- input$ct_draft_op$op
+    site <- input$ct_draft_op$site
+    ct_focus_site(if (!is.null(site) && nzchar(site)) site else NULL)
     if (identical(op, input$ct_operator)) {
-      updateCheckboxGroupInput(session, "ct_sites", selected = ct_default_keys(ct_op_sites()))
+      rows <- ct_op_sites()
+      foc <- ct_focus_site()
+      updateCheckboxGroupInput(session, "ct_sites",
+                               selected = if (!is.null(foc) && foc %in% rows$key) foc else ct_default_keys(rows))
     } else {
       updateSelectizeInput(session, "ct_operator", selected = op)
     }
@@ -3668,14 +3703,17 @@ empty_plot <- function(msg) {
 
 # "Draft email" button that opens the Contact tab composer for an operator.
 # popup = TRUE gives the light style used inside Leaflet popups.
-draft_btn_html <- function(operator, popup = FALSE) {
+# site = site key (site_key_of()): that site is ticked and highlighted in the composer.
+draft_btn_html <- function(operator, popup = FALSE, site = NULL) {
   op <- htmltools::htmlEscape(coalesce(as.character(operator), ""), attribute = TRUE)
+  sk <- if (is.null(site)) "" else htmltools::htmlEscape(coalesce(as.character(site), ""), attribute = TRUE)
   ifelse(
     nzchar(op),
     paste0(
       if (popup) "<div class='map-draft-wrap'>" else "",
       "<button type='button' class='", if (popup) "map-draft-btn" else "row-draft-btn",
-      "' data-op='", op, "' onclick='dcMail.jump(this)' title='Draft a capacity-check email to ", op, "'>",
+      "' data-op='", op, "' data-site='", sk,
+      "' onclick='dcMail.jump(this)' title='Draft a capacity-check email to ", op, "'>",
       "<i class='fa-solid fa-pen-to-square' aria-hidden='true'></i> Draft email</button>",
       if (popup) "</div>" else ""
     ),
@@ -5328,7 +5366,7 @@ ui <- page_sidebar(
       
       card(
         card_title("calendar-days", "Capacity coming available",
-                   "In chronological order"),
+                   "In chronological order. Draft email asks the operator to confirm a row."),
         DTOutput("pipeline_table"),
         card_footer(
           actionButton(
@@ -6782,7 +6820,6 @@ main_server <- function(input, output, session) {
             "<br><b style='color:#F59E0B'>Capacity coming available soon - see Upcoming Capacity tab</b>",
             ""
           ),
-          if_else(is.na(Operator), "", draft_btn_html(Operator, popup = TRUE)),
           "</div>"
         ),
         label_txt = paste0(
@@ -7120,7 +7157,8 @@ main_server <- function(input, output, session) {
       "<br><br>",
       "<b>Coming online:</b> ", esc_html(map_df$Quarter), "<br>",
       "<b>MW available:</b> ", mw_txt,
-      ifelse(is.na(map_df$Operator), "", draft_btn_html(map_df$Operator, popup = TRUE)),
+      ifelse(is.na(map_df$Operator), "", draft_btn_html(map_df$Operator, popup = TRUE,
+                     site = site_key_of(map_df$Operator, map_df$City_clean, map_df$State, map_df$Country))),
       "</div>"
     )
     
@@ -7243,8 +7281,6 @@ main_server <- function(input, output, session) {
     
     df$Notes <- note_btn
     df$Range <- ifelse(nzchar(df$Range), df$Range, "<span class='note-none'>&ndash;</span>")
-    df$Contact <- draft_btn_html(df$Operator)
-    
     dt <- datatable(
       df,
       rownames = FALSE,
@@ -7255,10 +7291,8 @@ main_server <- function(input, output, session) {
         pageLength = 15,
         dom = "lfrtip",
         columnDefs = list(
-          list(targets = ncol(df) - 2, orderable = FALSE, searchable = FALSE,
-               className = "dt-center", width = "60px"),
           list(targets = ncol(df) - 1, orderable = FALSE, searchable = FALSE,
-               className = "dt-center", width = "110px"),
+               className = "dt-center", width = "60px"),
           list(targets = which(names(df) == "Range") - 1, className = "dt-right")
         ),
         language = list(
@@ -7454,12 +7488,17 @@ main_server <- function(input, output, session) {
       ))
     }
     
+    # "Draft email": ask the operator to confirm this upcoming capacity
+    df$Contact <- draft_btn_html(df$Operator, site = site_key_of(df$Operator, df$City, df$State, df$Country))
+    
     order_col <- which(names(df) == "Quarter_Order") - 1L
     quarter_col <- which(names(df) == "Quarter") - 1L
+    contact_col <- ncol(df) - 1L
     
     dt <- datatable(
       df,
       rownames = FALSE,
+      escape = setdiff(names(df), "Contact"),   # only the button column is HTML
       class = "compact hover",
       width = "100%",
       selection = "none",
@@ -7470,7 +7509,9 @@ main_server <- function(input, output, session) {
         order = list(list(order_col, "asc")),
         columnDefs = list(
           list(visible = FALSE, targets = order_col),
-          list(orderData = order_col, targets = quarter_col))
+          list(orderData = order_col, targets = quarter_col),
+          list(targets = contact_col, orderable = FALSE, searchable = FALSE,
+               className = "dt-center", width = "110px"))
       )
     )
     
@@ -7872,7 +7913,7 @@ main_server <- function(input, output, session) {
           }
         ),
         div(class = "fc-why", style = "margin-top:8px", HTML(r$Why)),
-        if (!is.na(r$Operator)) div(class = "fc-actions", HTML(draft_btn_html(r$Operator)))
+        if (!is.na(r$Operator)) div(class = "fc-actions", HTML(draft_btn_html(r$Operator, site = site_key_of(r$Operator, r$Market, r$State, r$Country))))
       )
     }))
   })
